@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>小说下载器 · Legado 书源 → TXT / EPUB</title>
+<meta name="description" content="输入书名,自动聚合搜索 3000+ 书源,一键下载整本小说并导出 TXT 与 EPUB。免费开源,Windows 桌面应用。">
+<style>
+  :root{
+    --bg:#0b1020; --bg2:#111833; --card:#161f3d; --line:#26305a;
+    --tx:#e8ecff; --mut:#9aa6d4; --acc:#5b8cff; --acc2:#7dd3fc;
+    --ok:#34d399; --warn:#fbbf24;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:linear-gradient(160deg,var(--bg),var(--bg2) 55%,var(--bg));color:var(--tx);
+       font-family:"Segoe UI","Microsoft YaHei",system-ui,-apple-system,sans-serif;line-height:1.7}
+  a{color:var(--acc2);text-decoration:none}
+  a:hover{text-decoration:underline}
+  .wrap{max-width:1080px;margin:0 auto;padding:0 22px}
+  /* hero */
+  header{padding:88px 0 56px;text-align:center;position:relative;overflow:hidden}
+  header::before{content:"";position:absolute;inset:0;
+    background:radial-gradient(600px 260px at 50% -60px,rgba(91,140,255,.35),transparent 70%);pointer-events:none}
+  .logo{font-size:56px;line-height:1}
+  h1{font-size:44px;letter-spacing:1px;margin:14px 0 6px}
+  h1 b{background:linear-gradient(90deg,var(--acc),var(--acc2));-webkit-background-clip:text;background-clip:text;color:transparent}
+  .tag{color:var(--mut);font-size:18px;max-width:640px;margin:10px auto 28px}
+  .badges{display:flex;gap:10px;justify-content:center;flex-wrap:wrap;font-size:13px}
+  .badge{background:var(--card);border:1px solid var(--line);padding:4px 12px;border-radius:99px;color:var(--mut)}
+  .cta{display:flex;gap:14px;justify-content:center;flex-wrap:wrap;margin-top:30px}
+  .btn{display:inline-block;padding:13px 30px;border-radius:12px;font-weight:600;font-size:16px;transition:.15s}
+  .btn.p{background:linear-gradient(90deg,var(--acc),#4f7cff);color:#fff;box-shadow:0 8px 26px rgba(91,140,255,.35)}
+  .btn.p:hover{transform:translateY(-2px);text-decoration:none}
+  .btn.g{background:var(--card);border:1px solid var(--line);color:var(--tx)}
+  .btn.g:hover{border-color:var(--acc)}
+  .tiny{font-size:12px;color:var(--mut);text-align:center;margin-top:12px}
+  /* feature grid */
+  section{padding:46px 0}
+  h2{font-size:26px;text-align:center;margin-bottom:8px}
+  .sub{text-align:center;color:var(--mut);margin-bottom:34px}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:18px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:22px;transition:.15s}
+  .card:hover{transform:translateY(-3px);border-color:var(--acc)}
+  .card .ic{font-size:28px}
+  .card h3{font-size:17px;margin:8px 0 6px}
+  .card p{color:var(--mut);font-size:14px}
+  /* steps */
+  .steps{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:18px;counter-reset:s}
+  .step{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:22px;position:relative}
+  .step::before{counter-increment:s;content:counter(s);position:absolute;top:16px;right:18px;
+     font-size:34px;font-weight:800;color:rgba(91,140,255,.25)}
+  .step h3{font-size:16px;margin-bottom:8px}
+  .step p{color:var(--mut);font-size:14px}
+  /* app mock */
+  .mock{background:#0d1330;border:1px solid var(--line);border-radius:16px;overflow:hidden;max-width:760px;margin:0 auto}
+  .mbar{background:#0a0f26;padding:9px 14px;display:flex;gap:6px;align-items:center;border-bottom:1px solid var(--line)}
+  .dot{width:11px;height:11px;border-radius:50%}
+  .mtitle{margin-left:10px;font-size:12px;color:var(--mut)}
+  .mrow{display:flex;gap:8px;padding:14px;flex-wrap:wrap;align-items:center}
+  .msearch{flex:1;min-width:180px;background:#0a0f26;border:1px solid var(--line);border-radius:9px;padding:8px 12px;color:var(--tx);font-size:13px}
+  .mbtn{background:var(--acc);color:#fff;border:none;border-radius:9px;padding:8px 16px;font-size:13px}
+  .mtable{padding:0 14px 16px}
+  .row{display:grid;grid-template-columns:2.2fr 1fr 1fr 1.2fr;gap:8px;padding:8px 10px;border-radius:8px;font-size:13px}
+  .row.h{color:var(--mut);font-size:12px}
+  .row:not(.h):nth-child(odd){background:rgba(255,255,255,.03)}
+  .ok{color:var(--ok)} .hl{color:var(--warn)}
+  /* footer / warn */
+  .warn{max-width:820px;margin:0 auto;background:rgba(251,191,36,.07);border:1px solid rgba(251,191,36,.35);
+        border-radius:14px;padding:18px 22px;font-size:13.5px;color:#e9d9a8}
+  footer{padding:38px 0 60px;color:var(--mut);text-align:center;font-size:13px;border-top:1px solid var(--line);margin-top:20px}
+  .kbd{background:#0a0f26;border:1px solid var(--line);border-radius:6px;padding:1px 8px;font-size:12px}
+  @media(max-width:640px){ h1{font-size:30px}.logo{font-size:44px} }
+</style>
+</head>
+<body>
+<header>
+  <div class="wrap">
+    <div class="logo">📚⬇️</div>
+    <h1><b>小说下载器</b></h1>
+    <p class="tag">输入书名 → 聚合搜索 3000+ 书源 → 下载整本 → 导出 <b>TXT</b> 与 <b>EPUB</b></p>
+    <div class="badges">
+      <span class="badge">🪟 Windows 桌面</span>
+      <span class="badge">🐍 Python 3.14</span>
+      <span class="badge">🆓 开源 MIT</span>
+      <span class="badge">⚡ 增量上屏 · 40 并发</span>
+      <span class="badge">🔍 模糊搜索</span>
+    </div>
+    <div class="cta">
+      <a class="btn p" href="https://github.com/WakuOOXX/novel-downloader/releases/latest/download/novel-downloader-v1.0.0-windows-x64.zip">⬇️ 下载 Windows 版 (v1.0.0)</a>
+      <a class="btn g" href="https://github.com/WakuOOXX/novel-downloader">查看源代码 ↗</a>
+    </div>
+    <p class="tiny">免安装 · 约 40 MB(含书源包)· 已实测 Windows 11</p>
+  </div>
+</header>
+
+<section>
+  <div class="wrap">
+    <h2>为什么好用</h2>
+    <p class="sub">书源会失效?搜不到书名?换词重试太麻烦?——这些问题都替你处理好了。</p>
+    <div class="grid">
+      <div class="card"><div class="ic">🔀</div><h3>3000+ 书源聚合</h3><p>一次搜索并发打向数千个书源(纯规则引擎,自动跳过需要 JS/登录的源),结果边搜边上屏。</p></div>
+      <div class="card"><div class="ic">🔍</div><h3>模糊搜索兜底</h3><p>直搜无果自动换关键词变体重试,只对本轮存活源;结果按相关度排序,不怕记错全名。</p></div>
+      <div class="card"><div class="ic">📄</div><h3>TXT + EPUB 双格式</h3><p>UTF-8(TXT)与标准 EPUB3 同时导出,兼容手机阅读器 / 电纸书 / 电脑。</p></div>
+      <div class="card"><div class="ic">🧠</div><h3>Legado 规则引擎</h3><p>自研纯 Python 解析 class/id/XPath/JSONPath 选择器、正则替换与多页正文拼接。</p></div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>界面一览</h2>
+    <p class="sub">干净的三步操作:输入 → 双击 → 导出</p>
+    <div class="mock">
+      <div class="mbar"><span class="dot" style="background:#ff5f57"></span><span class="dot" style="background:#febc2e"></span><span class="dot" style="background:#28c840"></span><span class="mtitle">小说下载器 · Legado书源 → TXT / EPUB</span></div>
+      <div class="mrow">
+        <span class="msearch">书名:《斗破苍穹》</span>
+        <span class="mbtn">🔍 搜索</span>
+        <span style="font-size:12px;color:var(--mut)">☑ 模糊搜索</span>
+        <span class="msearch" style="flex:0 0 auto;width:auto;color:var(--ok)">已返回 18 条(搜索中…)</span>
+      </div>
+      <div class="mtable">
+        <div class="row h"><span>书名</span><span>作者</span><span>分类</span><span>书源</span></div>
+        <div class="row"><span><span class="hl">斗破苍穹</span></span><span>天蚕土豆</span><span>玄幻</span><span>笔趣阁网</span></div>
+        <div class="row"><span>斗破苍穹 之无上之境</span><span>夜雨闻铃0</span><span>同人</span><span>笔趣阁网</span></div>
+        <div class="row"><span>斗破:从签到异火开始</span><span>乌蒙山下</span><span>同人</span><span>笔趣阁网</span></div>
+        <div class="row"><span>万相之王</span><span>天蚕土豆</span><span>玄幻</span><span>笔趣阁网</span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>三步上手</h2>
+    <p class="sub">Windows 用户下载即用,无需安装 Python</p>
+    <div class="steps">
+      <div class="step"><h3>下载并解压</h3><p>获取上方 Windows 版压缩包,解压后保持 <span class="kbd">小说下载器.exe</span> 与 <span class="kbd">bookSource.json</span> 在同一文件夹。</p></div>
+      <div class="step"><h3>搜索书名</h3><p>双击打开,输入书名点搜索。想更快可在顶部只选「校验可用 / 笔趣阁0905」等分组。</p></div>
+      <div class="step"><h3>导出双格式</h3><p>双击结果行即开始下载,完成后自动打开目录 —— <span class="ok">TXT + EPUB</span> 都在里面。</p></div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>从源码运行 / 自行构建</h2>
+    <p class="sub">需要 Python 3.13+ 与 tkinter;引擎模块 <span class="kbd">legado/</span> 可脱离 GUI 单独使用</p>
+    <div class="card" style="text-align:left;font-size:14px">
+      <pre style="background:#0a0f26;border-radius:10px;padding:16px;overflow:auto;color:#bfe0ff"><code>pip install requests beautifulsoup4 lxml
+python app.py                # 运行 GUI
+python e2e2.py 书名 书源域名  # 全链路自检(含 EPUB 结构校验)
+
+# 打包单文件 EXE
+pip install pyinstaller
+pyinstaller --noconfirm --clean --onefile --windowed --name 小说下载器 app.py
+</code></pre>
+      <p style="color:var(--mut);margin-top:10px">详细实现见仓库内 <a href="https://github.com/WakuOOXX/novel-downloader/blob/main/技术文档.md">技术文档.md</a>(13 章:规则引擎、架构、导出格式、扩展指引)。</p>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <div class="warn">
+      <b>⚠️ 免责声明</b><br>
+      本项目仅用于<u>学习与研究</u> Legado 规则引擎与网络请求技术。内置书源清单来自网络公开共享,<u>不保证可用性</u>,亦不对任何源的内容负责。
+      请尊重作品版权:仅供个人试读,下载内容请于 24 小时内删除,长期阅读请支持正版(起点、晋江等官方平台)。
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <p>小说下载器 · 开源项目 | MIT License · © 2026 WakuOOXX</p>
+    <p style="margin-top:6px"><a href="https://github.com/WakuOOXX/novel-downloader">GitHub 仓库</a> · <a href="https://github.com/WakuOOXX/novel-downloader/releases">Releases 下载</a> · 用 ♥ 与 Python 构建</p>
+  </div>
+</footer>
+</body>
+</html>

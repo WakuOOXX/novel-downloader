@@ -1,0 +1,11 @@
+# 忽略本地/大文件产物
+__pycache__/
+*.pyc
+build/
+dist/
+*.spec
+downloads/
+samples/
+release/
+probe_hits.json
+*.log

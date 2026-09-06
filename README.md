@@ -42,7 +42,7 @@ Windows 桌面应用 · Python + tkinter · 自研 Legado 规则引擎
 ## 🚀 快速开始
 
 ### 方式一:Windows 免安装版(推荐)
-1. 下载 [novel-downloader-v1.0.0-windows-x64.zip](https://github.com/WakuOOXX/novel-downloader/releases/latest/download/novel-downloader-v1.0.0-windows-x64.zip) 并解压;
+1. 下载 [novel-downloader-v1.1.0-windows-x64.zip](https://github.com/WakuOOXX/novel-downloader/releases/latest/download/novel-downloader-v1.1.0-windows-x64.zip) 并解压;
 2. 保持 `小说下载器.exe` 与 `bookSource.json` 在同一文件夹;
 3. 双击 exe → 输入书名 → 搜索 → 双击结果下载。
 

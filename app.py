@@ -1,16 +1,20 @@
 # -*- coding: utf-8 -*-
 """小说下载器 —— 桌面 GUI(输入书名 → 选书 → 导出 TXT/EPUB)。"""
+import json
 import os
 import queue
 import subprocess
 import sys
 import threading
+import time
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from legado import engine, export
+from selpolicy import (MIN_DRAG, DOUBLE_MS, apply_click, apply_range,
+                       apply_rubber, restore_filter)
 
 if getattr(sys, "frozen", False):          # PyInstaller 打包后:资源文件放 exe 同目录
     APP_DIR = Path(sys.executable).resolve().parent
@@ -18,6 +22,72 @@ else:
     APP_DIR = Path(__file__).resolve().parent
 DEFAULT_SOURCE = APP_DIR / "bookSource.json"
 DEFAULT_OUT = APP_DIR / "downloads"
+STATE_FILE = APP_DIR / "sel_state.json"    # 多选模式 + 选中项记忆(见 _mem_*)
+
+
+class DownloadDialog:
+    """下载方式选择弹窗:单一(自动跳过被封书源) / 合并(每本都下) + 导出格式单选。"""
+
+    def __init__(self, parent, n, default_fmt="epub", default_mode="single"):
+        self.result = None
+        top = tk.Toplevel(parent)
+        top.title("下载选项")
+        top.transient(parent)
+        top.resizable(False, False)
+        top.protocol("WM_DELETE_WINDOW", self._cancel)
+        self.top = top
+
+        frm = ttk.Frame(top, padding=14)
+        frm.pack(fill="both", expand=True)
+
+        ttk.Label(frm, text="已选中 %d 本书,请选择下载方式:" % n,
+                  font=("Microsoft YaHei UI", 9, "bold")).grid(
+            row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
+
+        self.mode = tk.StringVar(value=default_mode)
+        ttk.Radiobutton(frm, text="下载单一",
+                        variable=self.mode, value="single").grid(row=1, column=0, sticky="nw")
+        ttk.Label(frm, text="按顺序探测选中的书源,自动跳过被封/需登录的,\n"
+                           "只用第一本能成功下载的源,其余丢弃。",
+                  foreground="#555", justify="left").grid(row=1, column=1, sticky="w")
+
+        ttk.Radiobutton(frm, text="合并下载",
+                        variable=self.mode, value="batch").grid(row=2, column=0, sticky="nw", pady=(8, 0))
+        ttk.Label(frm, text="选中的每一本都下载,各自导出为独立文件。\n"
+                            "被封的源会跳过并在日志中标红。",
+                  foreground="#555", justify="left").grid(row=2, column=1, sticky="w", pady=(8, 0))
+
+        ttk.Separator(frm, orient="horizontal").grid(row=3, column=0, columnspan=2,
+                                                     sticky="ew", pady=12)
+
+        ttk.Label(frm, text="导出格式(二选一):").grid(row=4, column=0, columnspan=2, sticky="w")
+        self.fmt = tk.StringVar(value=default_fmt)
+        ttk.Radiobutton(frm, text="EPUB", variable=self.fmt, value="epub").grid(
+            row=5, column=0, sticky="w", padx=(12, 0))
+        ttk.Radiobutton(frm, text="TXT", variable=self.fmt, value="txt").grid(
+            row=5, column=1, sticky="w")
+
+        btns = ttk.Frame(frm)
+        btns.grid(row=6, column=0, columnspan=2, sticky="e", pady=(14, 0))
+        ttk.Button(btns, text="取消", command=self._cancel, width=8).pack(side="right", padx=(8, 0))
+        ttk.Button(btns, text="开始下载", command=self._ok, width=10).pack(side="right")
+
+        top.update_idletasks()
+        w, h = top.winfo_width(), top.winfo_height()
+        x = parent.winfo_rootx() + (parent.winfo_width() - w) // 2
+        y = parent.winfo_rooty() + (parent.winfo_height() - h) // 2
+        top.geometry("+%d+%d" % (max(x, 0), max(y, 0)))
+        top.grab_set()
+        top.focus_force()
+        parent.wait_window(top)
+
+    def _ok(self):
+        self.result = (self.mode.get(), self.fmt.get())
+        self.top.destroy()
+
+    def _cancel(self):
+        self.result = None
+        self.top.destroy()
 
 
 class App:
@@ -35,10 +105,21 @@ class App:
         self.busy_search = False
         self.busy_dl = False
         self._last_key = ""
+        self.var_fmt = tk.StringVar(value="epub")      # 导出格式:epub / txt(二选一)
+        self.var_mode = tk.StringVar(value="single")   # 下载方式:single / batch
+
+        # —— 多选交互状态(资源管理器式,常开;见 MultiSelect 相关方法)——
+        mem = self._mem_load()
+        self._drag = None          # 进行中的橡皮筋状态 dict 或 None
+        self._press = None         # 左键按下信息
+        self._last_click = None    # 上次单击信息,用于双击判定
+        self._mem_last = mem       # 记忆缓存(含 selected key 列表)
 
         self._build_ui()
+        self._anchor = None        # Shift 连续选锚点行(资源管理器语义)
         self.root.after(120, self._drain)
         self.reload_sources(DEFAULT_SOURCE)
+        self._restore_pending = bool(mem.get("selected"))   # 搜索结果到达后尝试恢复
 
     # ------------------------------------------------------------- UI -------
     def _build_ui(self):
@@ -74,11 +155,12 @@ class App:
         self.lbl_progress = ttk.Label(row2, text="", foreground="#555")
         self.lbl_progress.pack(side="left", padx=10)
 
-        # 结果表
+        # 结果表:普通 tree + 滚动条(tree 持鼠标捕获,橡皮筋选框为拖动时临时 Toplevel)
         mid = ttk.Frame(self.root)
         mid.pack(fill="both", expand=True, padx=8, pady=4)
         cols = ("name", "author", "kind", "last", "src")
-        self.tree = ttk.Treeview(mid, columns=cols, show="headings", selectmode="browse")
+        # 选择全部由 self._apply_selection 维护,selectmode 恒 extended
+        self.tree = ttk.Treeview(mid, columns=cols, show="headings", selectmode="extended")
         heads = {"name": ("书名", 300), "author": ("作者", 110), "kind": ("分类", 90),
                  "last": ("最新章节", 160), "src": ("书源", 160)}
         for c, (t, w) in heads.items():
@@ -88,14 +170,51 @@ class App:
         self.tree.configure(yscrollcommand=vs.set)
         self.tree.pack(side="left", fill="both", expand=True)
         vs.pack(side="right", fill="y")
-        self.tree.bind("<Double-1>", lambda ev: self.start_download())
+        self.tree.bind("<<TreeviewSelect>>", lambda ev: self._sync_sel_label())  # 键盘增选时同步计数
+        self.tree.tag_configure("blocked", foreground="#b00020")   # 被封/失败的源标红
+        # 移除 Treeview 类级绑定(其内置"单击替换选择/拖拽行选"会与自定义交互冲突),
+        # 滚轮与方向键等必要行为由下方自行接管。
+        try:
+            self.tree.bindtags((str(self.tree), ".", "all"))
+        except Exception:
+            pass
+        self.tree.bind("<MouseWheel>", self._ms_wheel)
+        self.tree.bind("<Button-4>", lambda e: self._ms_wheel_scroll(e, 1))
+        self.tree.bind("<Button-5>", lambda e: self._ms_wheel_scroll(e, -1))
+        self.tree.bind("<KeyRelease>", self._on_key_nav)
+        self.tree.bind("<ButtonPress-1>", self._ms_press)
+        self.tree.bind("<B1-Motion>", self._ms_motion)
+        self.tree.bind("<ButtonRelease-1>", self._ms_release)
+        self.tree.bind("<Button-3>", self._ms_right)
+        self.root.bind("<Escape>", lambda e: self._ms_escape())
+        self.idx2iid = {}                                          # hits 下标 -> 行 id
+        self._rubber_top = None                                    # 橡皮筋半透明层(临时)
         self.lbl_hits = ttk.Label(self.root, text="未搜索", foreground="#888")
         self.lbl_hits.pack(anchor="w", padx=10)
+
+        # 选择辅助(多选模式下全部可用;单选模式下 全选/反选 置灰)
+        selbar = ttk.Frame(self.root)
+        selbar.pack(fill="x", padx=8, pady=(0, 2))
+        self.btn_sel_all = ttk.Button(selbar, text="全选", command=self.sel_all, width=7)
+        self.btn_sel_all.pack(side="left")
+        self.btn_sel_inv = ttk.Button(selbar, text="反选", command=self.sel_invert, width=7)
+        self.btn_sel_inv.pack(side="left", padx=4)
+        self.btn_sel_none = ttk.Button(selbar, text="清空选择", command=self.sel_none, width=9)
+        self.btn_sel_none.pack(side="left")
+        ttk.Button(selbar, text="清除记忆", command=self._mem_clear, width=9).pack(side="left", padx=4)
+        self.lbl_sel = ttk.Label(selbar, text="已选 0 本", foreground="#0066cc")
+        self.lbl_sel.pack(side="left", padx=12)
+        self.lbl_sel_hint = ttk.Label(
+            selbar,
+            text="单击=单选 · Ctrl+单击=增减 · Shift+单击=连续选 · 按住拖动=框选(Shift=追加) · Esc 取消",
+            foreground="#888")
+        self.lbl_sel_hint.pack(side="left")
 
         # 下载区
         dl = ttk.Frame(self.root)
         dl.pack(fill="x", padx=8, pady=4)
-        ttk.Button(dl, text="⬇ 下载选中(导出 TXT+EPUB)", command=self.start_download).pack(side="left")
+        self.btn_dl = ttk.Button(dl, text="⬇ 下载选中", command=self.start_download)
+        self.btn_dl.pack(side="left")
         ttk.Label(dl, text="保存到:").pack(side="left", padx=(16, 2))
         self.var_out = tk.StringVar(value=str(DEFAULT_OUT))
         ttk.Entry(dl, textvariable=self.var_out, width=34).pack(side="left")
@@ -106,6 +225,8 @@ class App:
         self.pbar.pack(fill="x", padx=8, pady=2)
         self.lbl_dl = ttk.Label(self.root, text="", foreground="#444")
         self.lbl_dl.pack(anchor="w", padx=10)
+        self.lbl_tick = ttk.Label(self.root, text="", foreground="#888")
+        self.lbl_tick.pack(anchor="w", padx=10)
 
         logf = ttk.LabelFrame(self.root, text="运行日志")
         logf.pack(fill="both", expand=False, padx=8, pady=(2, 6))
@@ -171,6 +292,11 @@ class App:
         self.hits = []
         for it in self.tree.get_children():
             self.tree.delete(it)
+        self.idx2iid = {}
+        self._drag = None            # 清掉可能的半途框选状态
+        self._press = None
+        self._last_click = None
+        self._sync_sel_label()
         self._last_key = key
         self.lbl_hits.config(text="搜索中…")
         srcs = self._chosen_sources()
@@ -216,17 +342,405 @@ class App:
         self.busy_search = b
         self.btn_search.config(state="disabled" if b else "normal")
         self.btn_stop.config(state="normal" if b or self.busy_dl else "disabled")
+        self.btn_dl.config(state="disabled" if self.busy_dl else "normal")
 
-    # 下载
+    # --------------------------------------------- 统一选中提交/回调 ---------
+    def _hit_key(self, h):
+        """条目的稳定 ID:(书源名, 详情URL)。用于记忆恢复与去重。"""
+        return (h["source"].get("bookSourceName", "?"), h["book_url"])
+
+    def _current_keys(self):
+        """当前选中行的稳定 ID 列表(按行序)。"""
+        keys = []
+        for iid in self.tree.selection():
+            tags = self.tree.item(iid, "tags")
+            try:
+                idx = int(tags[0]) if tags else None
+            except Exception:
+                idx = None
+            if idx is not None and 0 <= idx < len(self.hits):
+                keys.append(self._hit_key(self.hits[idx]))
+        return keys
+
+    def _apply_selection(self, iids, notify=True):
+        """唯一写选中入口:落 Treeview → 刷新标签 → 按需通知(持久化/外部回调)。
+
+        notify=True 表示"用户操作导致的最终状态",触发统一选中结果回调;
+        框选拖动过程与程序性恢复传 notify=False,避免中间态写记忆。
+        """
+        iids = [i for i in iids if i in self.tree.get_children()]
+        self.tree.selection_set(iids)
+        self.tree.selection_remove([i for i in self.tree.get_children() if i not in iids])
+        self._sync_sel_label()
+        if notify:
+            self._on_selection_changed(self._current_keys())
+
+    def _on_selection_changed(self, keys):
+        """统一选中结果回调(选中状态变化 → 上层)。
+        当前只做记忆持久化;未来接入外部消费者在此扩展。
+        """
+        self._mem_save(keys)
+
+    def _mem_load(self):
+        try:
+            with open(STATE_FILE, encoding="utf-8") as f:
+                d = json.load(f)
+            return {"multi": True, "selected": list(d.get("selected") or [])}
+        except Exception:
+            # 无记忆/文件损坏:空选中。多选交互常开(单击仍是单选,无害)。
+            return {"multi": True, "selected": []}
+
+    def _mem_save(self, keys=None):
+        try:
+            if keys is None:
+                keys = self._current_keys()
+            data = {"multi": True, "selected": [[s, u] for s, u in keys]}
+            with open(STATE_FILE, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False)
+            self._mem_last = {"multi": True, "selected": list(keys)}
+        except Exception:
+            pass
+
+    def _mem_clear(self):
+        """清除记忆入口:删状态文件 + 清空当前选中。"""
+        try:
+            STATE_FILE.unlink()
+        except Exception:
+            pass
+        self._mem_last = {"multi": True, "selected": []}
+        self._apply_selection([], notify=False)
+        messagebox.showinfo("清除记忆", "已清除保存的选中状态。")
+
+    def _try_restore_selection(self):
+        """搜索结果就绪后,按记忆恢复选中(容错:已不存在的条目自动跳过)。"""
+        mem = self._mem_last
+        if not mem or not mem.get("selected"):
+            return
+        avail = {self._hit_key(h) for h in self.hits}
+        keep = restore_filter(mem.get("selected"), avail)
+        if not keep:
+            return
+        by_key = {}
+        for iid, idx in self.idx2iid.items():
+            if 0 <= idx < len(self.hits):
+                by_key[self._hit_key(self.hits[idx])] = iid
+        want = [by_key[k] for k in keep if k in by_key]
+        if want:
+            self._apply_selection(want, notify=False)
+            self.log("已按上次记忆恢复 %d 条选中" % len(want))
+
+    # -------------------------------------------------- 框选/单击控制器 -----
+    def _row_at(self, y):
+        iid = self.tree.identify_row(y)
+        return iid or None
+
+    # —— 半透明橡皮筋框:拖动开始时创建一次,期间只改 geometry(性能) ——
+    def _rubber_create(self):
+        self._rubber_clear()
+        top = tk.Toplevel(self.root)
+        top.overrideredirect(True)
+        try:
+            top.attributes("-topmost", True)
+            top.attributes("-alpha", 0.25)
+        except Exception:
+            pass
+        top.withdraw()                                  # 先隐藏,有面积再显示
+        c = tk.Canvas(top, highlightthickness=0, bg="#1e80ff", bd=0)
+        c.pack(fill="both", expand=True)
+        # 松开/移动若落在遮罩上,同样走这里;坐标统一按"框左上角+局部偏移"换算
+        c.bind("<ButtonRelease-1>", self._ms_release)
+        c.bind("<B1-Motion>", self._ms_motion)
+        self._rubber_top = (top, c)
+
+    def _rubber_move(self, l, t, r, b):
+        """把遮罩挪到 tree 局部坐标 (l,t)-(r,b);零面积时隐藏。"""
+        if not self._rubber_top:
+            return
+        top = self._rubber_top[0]
+        w, h = r - l, b - t
+        if w < 1 or h < 1:
+            try:
+                top.withdraw()
+            except Exception:
+                pass
+            return
+        try:
+            top.deiconify()
+            top.geometry("%dx%d+%d+%d" % (w, h,
+                                          self.tree.winfo_rootx() + l,
+                                          self.tree.winfo_rooty() + t))
+        except Exception:
+            pass
+
+    def _rubber_clear(self):
+        if self._rubber_top:
+            try:
+                self._rubber_top[0].destroy()
+            except Exception:
+                pass
+            self._rubber_top = None
+
+    def _mods(self, e):
+        """修饰键标记(按位读 state)。"""
+        return {"ctrl": bool(e.state & 0x0004), "shift": bool(e.state & 0x0001)}
+
+    def _ev_xy(self, e):
+        """事件坐标统一为 tree 局部坐标:遮罩层事件按当前框左上角换算。"""
+        try:
+            if self._rubber_top and e.widget is self._rubber_top[1] and self._drag:
+                l, t = self._drag["cur"][0], self._drag["cur"][1]
+                return (l + e.x, t + e.y)
+        except Exception:
+            pass
+        return (e.x, e.y)
+
+    def _cache_rects(self):
+        """拖动开始时缓存全部可见行的纵向区间,拖动中命中检测零 Tcl 调用。"""
+        out = []
+        for iid in self.tree.get_children():
+            b = self.tree.bbox(iid)
+            if b and b[3] > 0:
+                out.append((iid, b[1], b[1] + b[3]))
+        return out
+
+    def _hit_rows(self, rect):
+        """rect=(l,t,r,b) 与缓存行区间求交(行全宽,忽略横向)。"""
+        _, t, _, b = rect
+        out = set()
+        for iid, y1, y2 in self._drag["rects"]:
+            if y2 >= t and y1 <= b:
+                out.add(iid)
+        return out
+
+    def _ms_press(self, e):
+        self.tree.focus_set()
+        try:
+            if self.tree.identify_region(e.x, e.y) == "heading":
+                return                     # 点表头:不参与选择
+        except Exception:
+            pass
+        if self._drag:                     # 上一把没收尾的框选,先清理
+            self._rubber_clear()
+            self._drag = None
+        row = self._row_at(e.y)
+        if row:
+            self.tree.focus(row)
+        m = self._mods(e)
+        self._press = {"x": e.x, "y": e.y, "row": row, "t": time.time(),
+                       "ctrl": m["ctrl"], "shift": m["shift"]}
+
+    def _ms_motion(self, e):
+        """按住左键拖动:超过阈值进入橡皮筋框选(资源管理器式)。
+
+        - 普通拖动:松开=只留框内(替换当前选中)。
+        - Shift/Ctrl+拖动:松开=追加进现有选中。
+        性能:行区间走拖动开始时的缓存,预览 ~30ms 节流,集合未变不刷 Treeview。
+        """
+        if not self._press:
+            return
+        p = self._press
+        x, y = self._ev_xy(e)
+        dx, dy = abs(x - p["x"]), abs(y - p["y"])
+        if self._drag is None:
+            if max(dx, dy) < MIN_DRAG:          # 低于阈值 → 仍是"单击",不框选
+                return
+            self._drag = {"x1": p["x"], "y1": p["y"],
+                          "sel_before": set(self.tree.selection()),
+                          "append": bool(p["shift"] or p["ctrl"]),
+                          "rects": self._cache_rects(),
+                          "cur": (p["x"], p["y"], p["x"], p["y"]),
+                          "last_ts": 0.0, "last_sel": None}
+            self._rubber_create()
+            self.log("框选开始(松开确认 · %s · Esc 取消)" %
+                     ("Shift/Ctrl 追加" if self._drag["append"] else "替换"))
+        now = time.time()
+        if now - self._drag["last_ts"] < 0.03:  # 节流:预览最多 ~33fps
+            return
+        self._drag["last_ts"] = now
+        wv = max(self.tree.winfo_width(), 1)
+        hv = max(self.tree.winfo_height(), 1)
+        x2 = min(max(x, 0), wv - 1)
+        y2 = min(max(y, 0), hv - 1)
+        x1, y1 = self._drag["x1"], self._drag["y1"]
+        rect = (min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2))
+        self._drag["cur"] = rect
+        self._rubber_move(*rect)
+        sel = self._hit_rows(rect)
+        if p["row"]:
+            sel.add(p["row"])
+        final = apply_rubber(self._drag["sel_before"], sel, self._drag["append"])
+        if final != self._drag["last_sel"]:     # 集合没变就不刷 Treeview
+            self._drag["last_sel"] = final
+            self._apply_selection(final, notify=False)
+
+    def _ms_release(self, e):
+        p = self._press
+        self._press = None
+        if not p:
+            return
+        x, y = self._ev_xy(e)
+        if self._drag is not None:
+            # 松开 → 框选结束:命中 = 起点行 ∪ 框内/相交行
+            d = self._drag
+            x1, y1 = d["x1"], d["y1"]
+            x2, y2 = (x if x is not None else x1), (y if y is not None else y1)
+            rect = (min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2))
+            added = self._hit_rows(rect)
+            if p["row"]:
+                added.add(p["row"])
+            final = apply_rubber(d["sel_before"], added, d["append"])
+            self._rubber_clear()
+            self._drag = None
+            if p["row"]:
+                self._anchor = p["row"]
+            self._apply_selection(final, notify=True)
+            self.log("框选结束:选中 %d 本%s" % (len(final), " (追加)" if d["append"] else ""))
+            return
+        # —— 单击(含双击)/修饰键点击 ——
+        row = p.get("row") or self._row_at(y if y is not None else -1)   # 按下位置为准
+        now = time.time()
+        plain = not (p["ctrl"] or p["shift"])
+        lc = self._last_click
+        if (plain and lc and lc["row"] == row and row and
+                (now - lc["t"]) * 1000 <= DOUBLE_MS and
+                max(abs(x - lc["x"]), abs(y - lc["y"])) < 10):
+            # 双击(无修饰键):维持原双击语义 = 下载该行
+            self._last_click = None
+            self._apply_selection({row}, notify=True)
+            self._anchor = row
+            self.start_download()
+            return
+        cur = set(self.tree.selection())
+        if plain:
+            new = {row} if row else set()
+            if row:
+                self._anchor = row
+        elif p["ctrl"]:
+            new = apply_click(cur, True, row)      # Ctrl:逐个增减,锚点不动
+        else:                                      # Shift:从锚点连续选(替换)
+            if row and self._anchor:
+                new = apply_range(self.tree.get_children(), self._anchor, row)
+            else:
+                new = {row} if row else cur
+        if new != cur:
+            self._apply_selection(new, notify=True)
+        if plain and row:
+            self._last_click = {"row": row, "x": x, "y": y, "t": now}
+
+    def _ms_escape(self):
+        """框选过程中按 Esc:取消框选,恢复拖动前的选中状态。"""
+        if self._drag is None:
+            return
+        d = self._drag
+        self._rubber_clear()
+        self._drag = None
+        self._press = None
+        self._apply_selection(d["sel_before"], notify=True)
+        self.log("已取消框选(恢复拖动前选中 %d 本)" % len(d["sel_before"]))
+
+    def _ms_right(self, e):
+        """右键:保持 tree 默认语义(上层如需右键菜单,在此扩展,不与多选冲突)。"""
+
+    def _ms_wheel(self, e):
+        try:
+            self.tree.yview_scroll(int(-e.delta / 120), "units")
+        except Exception:
+            pass
+
+    def _ms_wheel_scroll(self, e, step):
+        try:
+            self.tree.yview_scroll(step, "units")
+        except Exception:
+            pass
+
+    def _on_key_nav(self, e):
+        """接管 ↑/↓/Home/End/空格:单/双选模式下与鼠标策略一致。"""
+        ks = e.keysym
+        if ks not in ("Up", "Down", "Home", "End", "space"):
+            return
+        rows = self.tree.get_children()
+        if not rows:
+            return
+        try:
+            i = rows.index(self.tree.focus())
+        except Exception:
+            i = -1
+        if ks == "Down":
+            j = min(len(rows) - 1, i + 1)
+        elif ks == "Up":
+            j = max(0, i - 1)
+        elif ks == "Home":
+            j = 0
+        elif ks == "End":
+            j = len(rows) - 1
+        else:                            # space
+            row = rows[i] if 0 <= i < len(rows) else rows[0]
+            cur = set(self.tree.selection())
+            new = apply_click(cur, True, row)      # 空格:切换焦点行
+            self.tree.focus(row)
+            self.tree.see(row)
+            if new != cur:
+                self._apply_selection(new, notify=True)
+            return "break"
+        self.tree.focus(rows[j])
+        self.tree.see(rows[j])
+        if e.state & 0x0001:              # Shift+方向键:从锚点扩展
+            base = self._anchor if self._anchor in rows else rows[j]
+            new = apply_range(rows, base, rows[j])
+            self._apply_selection(new, notify=True)
+        elif not (e.state & 0x0004):      # 普通方向键:单选该行;Ctrl 只移焦点
+            self._apply_selection({rows[j]}, notify=True)
+            self._anchor = rows[j]
+        return "break"
+
+    # -------------------------------------------------- 多选辅助 -------------
+    def _sel_indices(self):
+        """当前选中行的 hits 下标(按表格顺序)。"""
+        out = []
+        for iid in self.tree.selection():
+            tags = self.tree.item(iid, "tags")
+            if tags:
+                try:
+                    out.append(int(tags[0]))
+                except Exception:
+                    pass
+        return sorted(set(out))
+
+    def _sync_sel_label(self):
+        n = len(self._sel_indices())
+        self.lbl_sel.config(text="已选 %d 本" % n)
+        self.btn_dl.config(text="⬇ 下载选中(%d)" % n if n else "⬇ 下载选中")
+
+    def sel_all(self):
+        self._apply_selection(self.tree.get_children(), notify=True)
+
+    def sel_none(self):
+        self._apply_selection([], notify=True)
+
+    def sel_invert(self):
+        cur = set(self.tree.selection())
+        self._apply_selection([i for i in self.tree.get_children() if i not in cur],
+                              notify=True)
+
+    # ---------------------------------------------------- 下载 ---------------
     def start_download(self):
         if self.busy_dl:
             return
-        sel = self.tree.selection()
-        if not sel:
-            messagebox.showinfo("提示", "先在结果里双击/选中一本书")
+        idxs = self._sel_indices()
+        if not idxs:
+            messagebox.showinfo("提示", "先在结果里选中一本书(拖拽/Ctrl/Shift 可多选)")
             return
-        idx = int(self.tree.item(sel[0], "tags")[0]) if self.tree.item(sel[0], "tags") else 0
-        hit = self.hits[idx]
+        self.sel_idx = idxs
+        hits = [self.hits[i] for i in idxs]
+        dlg = DownloadDialog(self.root, len(hits),
+                             default_fmt=self.var_fmt.get(),
+                             default_mode=self.var_mode.get())
+        if not dlg.result:
+            return
+        mode, fmt = dlg.result
+        self.var_mode.set(mode)
+        self.var_fmt.set(fmt)
+
         out = self.var_out.get()
         try:
             Path(out).mkdir(parents=True, exist_ok=True)
@@ -235,94 +749,232 @@ class App:
             return
         self.stop_dl.clear()
         self.busy_dl = True
+        self._dl_t0 = time.time()
+        self._tick_last = -1
+        self.lbl_tick.config(text="已用时 0s")
+        self.btn_dl.config(state="disabled")
         self.btn_stop.config(state="normal")
         self.pbar.config(value=0)
-        self.lbl_dl.config(text="准备下载…")
-        threading.Thread(target=self._do_download, args=(hit, out), daemon=True).start()
+        self.lbl_dl.config(text="准备下载… %d 本 · 格式 %s" % (len(hits), fmt.upper()))
+        self.log("开始下载 %d 本 · 模式[%s] · 格式[%s]" %
+                 (len(hits), "下载单一" if mode == "single" else "合并下载", fmt.upper()))
+        threading.Thread(target=self._do_download,
+                         args=(hits, out, mode, fmt, idxs), daemon=True).start()
 
-    def _do_download(self, hit, out):
+    def _mark_blocked(self, fail_list):
+        """把下载失败(被封/需登录/空目录)的行标红,书源列加 ✖ 前缀。"""
+        for idx, _nm, srcname, _reason in fail_list:
+            iid = self.idx2iid.get(idx)
+            if not iid or iid not in self.tree.get_children():
+                continue
+            vals = list(self.tree.item(iid, "values"))
+            if len(vals) == 5 and not vals[4].startswith("✖"):
+                vals[4] = "✖ " + vals[4]
+            self.tree.item(iid, values=vals, tags=(str(idx), "blocked"))
+
+    def _export_one(self, book, out, fmt, batch):
+        """按选定格式导出单一格式。batch=True 时同名不同源自动加书源后缀,避免覆盖。"""
+        ext = "txt" if fmt == "txt" else "epub"
+        suffix = ""
+        if batch and (Path(out) / ("%s.%s" % (export.safe_name(book["title"]), ext))).exists():
+            suffix = "_" + export.safe_name(book.get("source", ""))
+        if fmt == "txt":
+            return export.export_txt(book, out, suffix)
+        return export.export_epub(book, out, suffix)
+
+    def _try_one(self, h, prog, out, fmt, batch):
+        """探测并下载一本书。返回 (book, path) 或抛异常。被封源直接抛 RuntimeError。
+
+        探测(目录)阶段限时:单请求 6s、总 15s——半死源快速失败,
+        "下载单一"模式能尽快换下一个候选,不会长时间停在探测上。
+        """
+        srcname = h["source"].get("bookSourceName", "?")
+        toc = engine.fetch_toc(h["source"], h["book_url"], stop=self.stop_dl,
+                               timeout=6, deadline=time.time() + 15)
+        if not toc:
+            raise RuntimeError("目录为空(书源被封或需登录)")
+        book = engine.load_book(h, toc=toc, on_progress=prog, stop=self.stop_dl, workers=10)
+        if self.stop_dl.is_set():
+            raise RuntimeError("已取消")
+        if book["ok"] == 0:
+            raise RuntimeError("正文 0/%d 章成功(书源被封)" % book["total"])
+        path = self._export_one(book, out, fmt, batch)
+        self.log("✔ 《%s》 %d/%d 章 · 源[%s] → %s" %
+                 (book["title"], book["ok"], book["total"], srcname, path))
+        return book, path
+
+    def _do_download(self, hits, out, mode, fmt, hit_idx=None):
+        """hit_idx:hits 各元素在 self.hits 中的真实下标(用于标红失败行)。"""
+        try:
+            self._do_download_inner(hits, out, mode, fmt, hit_idx)
+        except Exception:
+            # 下载线程的任何异常都必须可见(pythonw 下 stderr 不可见,
+            # 否则表现为"永远停在准备下载")
+            import traceback
+            self.q.put(("log", "✘ 下载线程异常: %s" % traceback.format_exc()[-500:]))
+            self.q.put(("dlerr", "下载线程异常,已终止: %s" % traceback.format_exc()[-200:]))
+
+    def _do_download_inner(self, hits, out, mode, fmt, hit_idx=None):
+        """hit_idx:hits 各元素在 self.hits 中的真实下标(用于标红失败行)。"""
+        n = len(hits)
+        hit_idx = hit_idx or list(range(n))
+
         def prog(done, total, msg):
             self.q.put(("dlprog", (done, total, msg)))
 
-        try:
-            book = engine.load_book(hit, on_progress=prog, stop=self.stop_dl, workers=10)
+        ok_list, fail_list = [], []
+        for bi, h in enumerate(hits):
             if self.stop_dl.is_set():
-                raise RuntimeError("已取消")
-            txt = export.export_txt(book, out)
-            epub = export.export_epub(book, out)
-            self.q.put(("dlok", (txt, epub, book)))
-        except Exception as e:
-            self.q.put(("dlerr", str(e)))
+                break
+            srcname = h["source"].get("bookSourceName", "?")
+            self.q.put(("dlbook", (bi, n, h["name"], srcname,
+                                   "探测目录(超时 6s,失败自动换源)…")))
+            try:
+                book, path = self._try_one(h, prog, out, fmt, batch=(mode == "batch"))
+            except Exception as e:
+                self.q.put(("log", "✘ 跳过[%s]《%s》: %s" % (srcname, h["name"], e)))
+                fail_list.append((hit_idx[bi], h["name"], srcname, str(e)))
+                continue              # 被封/失败 → 单一模式换下一个,合并模式继续下一本
+            ok_list.append((book, path))
+            self.q.put(("dlone", (book, path, bi, n)))
+            if mode == "single":
+                break                 # 单一模式:只保留第一本成功的,其余丢弃
+        if self.stop_dl.is_set():
+            self.q.put(("dlcancel", (ok_list, fail_list)))
+        else:
+            self.q.put(("dldone", (mode, fmt, ok_list, fail_list)))
 
     # ------------------------------------------------------- 事件泵 ----------
     def _drain(self):
+        """UI 事件泵:任何单条事件的处理异常都不允许杀死循环——
+        一旦 after 链断了,所有状态标签会永久冻结(表现为"停在准备下载")。"""
+        import traceback as _tb
         try:
             while True:
                 kind, payload = self.q.get_nowait()
-                if kind == "log":
-                    self._append(payload)
-                elif kind == "sprog":
-                    self.lbl_progress.config(text=payload)
-                elif kind == "hit":
-                    h = payload
-                    # 增量上屏(保持引擎去重语义:同一URL只入一次)
-                    if any(x["book_url"] == h["book_url"] and
-                           x["source"]["bookSourceName"] == h["source"]["bookSourceName"]
-                           for x in self.hits):
-                        continue
-                    self.hits.append(h)
-                    i = len(self.hits) - 1
-                    self.tree.insert("", "end",
-                                     values=(h["name"], h["author"], h["kind"],
-                                             h.get("last_chapter", ""),
-                                             h["source"]["bookSourceName"]),
-                                     tags=(str(i),))
-                    self.lbl_hits.config(text="搜索中… 已返回 %d 条" % len(self.hits))
-                elif kind == "sres":
-                    n, fuzzy = payload
-                    if fuzzy:
-                        self.hits.sort(key=self._score_hit, reverse=True)
-                    self._fill_results()
-                    self.lbl_progress.config(text="完成")
-                    self.lbl_hits.config(text="共找到 %d 条结果" % len(self.hits))
-                    self.log("搜索完成,共 %d 条%s" % (len(self.hits),
-                            " · 按相关度排序" if fuzzy else ""))
-                    self._set_busy(False)
-                elif kind == "dlprog":
-                    done, total, msg = payload
-                    self.pbar.config(maximum=max(total, 1), value=done)
-                    self.lbl_dl.config(text="正文 %d/%d · %s" % (done, total, msg))
-                elif kind == "dlok":
-                    txt, epub, book = payload
-                    self.busy_dl = False
-                    self._set_busy(False)
-                    self.pbar.config(value=self.pbar["maximum"])
-                    self.lbl_dl.config(text="完成:%d/%d 章" % (book["ok"], book["total"]))
-                    self.log("✔ 导出完成: %s" % txt)
-                    self.log("✔ 导出完成: %s" % epub)
-                    messagebox.showinfo("下载完成",
-                                        "《%s》 %d/%d 章成功\n\nTXT:%s\nEPUB:%s" %
-                                        (book["title"], book["ok"], book["total"], txt, epub))
-                    self.open_out()
-                elif kind == "dlerr":
-                    self.busy_dl = False
-                    self._set_busy(False)
-                    self.pbar.config(value=0)
-                    self.lbl_dl.config(text="失败")
-                    self.log("✘ %s" % payload)
-                    messagebox.showerror("下载失败", payload)
+                try:
+                    self._handle_event(kind, payload)
+                except Exception:
+                    self._append("✘ 事件处理异常[%s]: %s" %
+                                 (kind, _tb.format_exc()[-400:]))
         except queue.Empty:
             pass
+        # 下载进行中的用时跳动(让"探测/正文抓取中" visibly 活着)
+        if self.busy_dl and getattr(self, "_dl_t0", None):
+            s = int(time.time() - self._dl_t0)
+            if s != getattr(self, "_tick_last", -1):
+                self._tick_last = s
+                self.lbl_tick.config(text="已用时 %ds" % s)
         self.root.after(120, self._drain)
 
+    def _handle_event(self, kind, payload):
+        if kind == "log":
+            self._append(payload)
+        elif kind == "sprog":
+            self.lbl_progress.config(text=payload)
+        elif kind == "hit":
+            h = payload
+            # 增量上屏(保持引擎去重语义:同一URL只入一次)
+            if any(x["book_url"] == h["book_url"] and
+                   x["source"]["bookSourceName"] == h["source"]["bookSourceName"]
+                   for x in self.hits):
+                return
+            self.hits.append(h)
+            i = len(self.hits) - 1
+            iid = self.tree.insert("", "end",
+                                   values=(h["name"], h["author"], h["kind"],
+                                           h.get("last_chapter", ""),
+                                           h["source"]["bookSourceName"]),
+                                   tags=(str(i),))
+            self.idx2iid[i] = iid
+            self.lbl_hits.config(text="搜索中… 已返回 %d 条" % len(self.hits))
+        elif kind == "sres":
+            n, fuzzy = payload
+            if fuzzy:
+                self.hits.sort(key=self._score_hit, reverse=True)
+            self._fill_results()
+            self.lbl_progress.config(text="完成")
+            self.lbl_hits.config(text="共找到 %d 条结果" % len(self.hits))
+            self.log("搜索完成,共 %d 条%s" % (len(self.hits),
+                    " · 按相关度排序" if fuzzy else ""))
+            self._try_restore_selection()
+            self._set_busy(False)
+        elif kind == "dlprog":
+            done, total, msg = payload
+            self.pbar.config(maximum=max(total, 1), value=done)
+            self.lbl_dl.config(text="正文 %d/%d · %s" % (done, total, msg))
+        elif kind == "dlbook":
+            bi, n, name, srcname, msg = payload
+            self.pbar.config(value=0)
+            self.lbl_dl.config(text="第 %d/%d 本《%s》 · 源[%s] · %s" %
+                               (bi + 1, n, name, srcname, msg))
+        elif kind == "dlone":
+            book, path, bi, n = payload
+            self.log("已保存: %s" % path)
+        elif kind == "dldone":
+            mode, fmt, ok_list, fail_list = payload
+            self.busy_dl = False
+            self._set_busy(False)
+            self.btn_dl.config(state="normal")
+            self._mark_blocked(fail_list)
+            self.lbl_tick.config(text="")
+            self.pbar.config(value=self.pbar["maximum"] if ok_list else 0)
+            if ok_list:
+                total_ok = sum(b["ok"] for b, _ in ok_list)
+                total_ch = sum(b["total"] for b, _ in ok_list)
+                self.lbl_dl.config(text="完成:%d 本 · %d/%d 章" %
+                                   (len(ok_list), total_ok, total_ch))
+                lines = ["《%s》 %d/%d 章" % (b["title"], b["ok"], b["total"])
+                         for b, _ in ok_list]
+                detail = "\n".join(lines)
+                if fail_list:
+                    detail += "\n\n已跳过被封/失败 %d 个:\n" % len(fail_list)
+                    detail += "\n".join("· [%s] %s" % (s, r)
+                                        for _, _, s, r in fail_list[:8])
+                self.log("下载结束:成功 %d 本,跳过 %d 个" % (len(ok_list), len(fail_list)))
+                messagebox.showinfo(
+                    "下载完成",
+                    "成功 %d 本 · 格式 %s\n\n%s\n\n保存目录:\n%s" %
+                    (len(ok_list), fmt.upper(), detail, self.var_out.get()))
+                self.open_out()
+            else:
+                self.lbl_dl.config(text="全部失败")
+                detail = "\n".join("· [%s]《%s》: %s" % (s, nm, r)
+                                   for _, nm, s, r in fail_list[:10])
+                self.log("✘ 全部失败:%d 个候选" % len(fail_list))
+                messagebox.showerror(
+                    "下载失败",
+                    "选中的 %d 个候选全部不可用(被封/需登录/无目录):\n\n%s" %
+                    (len(fail_list) or 1, detail or "未知原因"))
+        elif kind == "dlcancel":
+            ok_list, fail_list = payload
+            self.busy_dl = False
+            self._set_busy(False)
+            self.btn_dl.config(state="normal")
+            self.pbar.config(value=0)
+            self.lbl_tick.config(text="")
+            self.lbl_dl.config(text="已取消")
+            self.log("已取消(成功 %d / 跳过 %d)" % (len(ok_list), len(fail_list)))
+        elif kind == "dlerr":
+            self.busy_dl = False
+            self._set_busy(False)
+            self.btn_dl.config(state="normal")
+            self.pbar.config(value=0)
+            self.lbl_tick.config(text="")
+            self.lbl_dl.config(text="失败")
+            self.log("✘ %s" % payload)
+            messagebox.showerror("下载失败", payload)
     def _fill_results(self):
         for it in self.tree.get_children():
             self.tree.delete(it)
+        self.idx2iid = {}
         for i, h in enumerate(self.hits):
-            self.tree.insert("", "end", values=(h["name"], h["author"], h["kind"],
-                                                h.get("last_chapter", ""),
-                                                h["source"]["bookSourceName"]),
-                             tags=(str(i),))
+            iid = self.tree.insert("", "end", values=(h["name"], h["author"], h["kind"],
+                                                      h.get("last_chapter", ""),
+                                                      h["source"]["bookSourceName"]),
+                                   tags=(str(i),))
+            self.idx2iid[i] = iid
+        self._sync_sel_label()
         self.lbl_hits.config(text="共找到 %d 条结果" % len(self.hits))
 
     def _append(self, s):

@@ -14,9 +14,9 @@ def safe_name(name: str) -> str:
     return n[:80] or "未命名"
 
 
-def export_txt(book, out_dir):
+def export_txt(book, out_dir, suffix=""):
     title = safe_name(book["title"])
-    path = Path(out_dir) / ("%s.txt" % title)
+    path = Path(out_dir) / ("%s%s.txt" % (title, suffix))
     parts = ["%s\n作者:%s\n来源书源:%s\n共 %d 章,成功 %d 章\n" %
              (book["title"], book.get("author", ""), book.get("source", ""),
               book.get("total", len(book["chapters"])), book.get("ok", 0))]
@@ -35,11 +35,11 @@ def _paras(text):
     return [p for p in paras if p]
 
 
-def export_epub(book, out_dir):
+def export_epub(book, out_dir, suffix=""):
     title = book["title"]
     author = book.get("author", "")
     fname = safe_name(title)
-    path = Path(out_dir) / ("%s.epub" % fname)
+    path = Path(out_dir) / ("%s%s.epub" % (fname, suffix))
     uid = uuid.uuid4()
     chap_xhtml = []
     for i, ch in enumerate(book["chapters"]):

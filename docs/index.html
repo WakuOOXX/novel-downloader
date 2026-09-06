@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>小说下载器 — 聚合搜索 3000+ 书源,一键导出 TXT / EPUB</title>
-<meta name="description" content="开源 Windows 桌面工具。输入书名,自动跳过失效书源、模糊换词重试,下载整本小说并导出 TXT 与 EPUB3。">
+<title>小说下载器 — 聚合搜索 3000+ 书源,多选框选批量下载,导出 EPUB / TXT</title>
+<meta name="description" content="开源 Windows 桌面工具。输入书名,自动跳过失效书源、模糊换词重试;多选/框选批量下载,被封源自动换源,导出 EPUB 或 TXT。">
 <style>
   :root{
     --bg:#f6f7fb; --card:#ffffff; --line:#e5e8f0;
@@ -185,7 +185,7 @@
   <div class="wrap">
     <span class="eyebrow"><span class="dot-pulse"></span>v1.0.0 已发布 · Windows 免安装</span>
     <h1>全网小说,一次搜索<br><span class="g">下载整本,导出即读</span></h1>
-    <p class="sub">把书名输入进去,剩下交给程序:3000+ 书源并发搜索、失效的自动跳过、搜不到就换词重试,正文逐章抓齐,导出 TXT 和 EPUB。</p>
+    <p class="sub">把书名输入进去,剩下交给程序:3000+ 书源并发搜索、失效的自动跳过、搜不到就换词重试;单击选一本,框选/Ctrl/Shift 批量选,导出 EPUB 或 TXT。</p>
     <div class="hero-cta">
       <a class="btn btn-p" href="https://github.com/WakuOOXX/novel-downloader/releases/latest">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
@@ -232,7 +232,7 @@
               <td>天蚕土豆</td><td>连载中</td><td><span class="tag tag-src">笔趣阁网</span></td>
             </tr>
           </table>
-          <div class="w-foot"><span>⬇ 正在导出</span><span class="bar"><i></i></span><span>斗破苍穹.txt · .epub</span></div>
+          <div class="w-foot"><span>⬇ 正在导出</span><span class="bar"><i></i></span><span>斗破苍穹.epub</span></div>
         </div>
       </div>
     </div>
@@ -241,7 +241,7 @@
       <div class="stat"><b>3000+</b><span>内置书源</span></div>
       <div class="stat"><b>40</b><span>并发搜索</span></div>
       <div class="stat"><b>1625</b><span>单本实测章节</span></div>
-      <div class="stat"><b>2</b><span>TXT · EPUB3 双导出</span></div>
+      <div class="stat"><b>2</b><span>EPUB / TXT 二选一</span></div>
     </div>
   </div>
 </header>
@@ -265,8 +265,13 @@
       </div>
       <div class="f">
         <span class="f-ic"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20V4H6.5A2.5 2.5 0 0 0 4 6.5v13z"/><path d="M20 17H6.5a2.5 2.5 0 0 0 0 5H20v-5z"/></svg></span>
-        <div><h3>同一次下载,TXT 和 EPUB 都有</h3>
-        <p>正文逐章抓齐(支持分页拼接),同时导出 UTF-8 TXT 与标准 EPUB3。手机阅读器、电纸书、电脑都直接能开。</p></div>
+        <div><h3>多选 / 框选,一次抓一批</h3>
+        <p>像资源管理器一样选书:单击选一本,Ctrl 逐个增减,Shift 连续选,按住左键拖出蓝框批量选。下载时选「单一」或「合并」,EPUB / TXT 二选一。</p></div>
+      </div>
+      <div class="f">
+        <span class="f-ic"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.7L20 10l-6.1 1.3L12 17l-1.9-5.7L4 10l6.1-1.3z"/><path d="M19 16l.9 2.6L22 20l-2.1.9L19 23l-.9-2.1L16 20l2.1-.4z"/></svg></span>
+        <div><h3>被封源自动换,不浪费时间</h3>
+        <p>下载前先探测候选源:单请求 6 秒、单源 15 秒封顶,半死源快速失败并自动标红跳过,直到找到能下全的源。正文逐章抓齐(支持分页拼接),格式不重复占空间。</p></div>
       </div>
       <div class="f">
         <span class="f-ic"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg></span>
@@ -294,7 +299,7 @@
       </div>
       <div class="step">
         <h3>双击结果,收文件</h3>
-        <p>进度条跑完自动打开输出目录。<code>TXT</code> 与 <code>EPUB</code> 就躺在里面。</p>
+        <p>进度条跑完自动打开输出目录。选好的 <code>EPUB</code>(或 <code>TXT</code>)就躺在里面。</p>
       </div>
     </div>
   </div>

@@ -3,6 +3,7 @@
 import json
 import re
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urljoin
 
@@ -204,7 +205,7 @@ def search_sources(sources, key, on_progress=None, stop=None, workers=24,
     return uniq
 
 
-def _resolve_toc_url(source, book_url):
+def _resolve_toc_url(source, book_url, timeout=None):
     """部分源需在书籍页找目录链接。默认书页即目录页。"""
     toc_rule = (source.get("ruleToc") or {}).get("tocUrl")
     if not toc_rule:
@@ -215,7 +216,8 @@ def _resolve_toc_url(source, book_url):
         req = rules.parse_request(book_url, {})
         headers = rules.parse_header(source.get("header"))
         url, text = fetch(source.get("bookSourceName", "?"), req["url"], req["method"],
-                          req.get("body", ""), headers, _clamp_timeout(source))
+                          req.get("body", ""), headers,
+                          timeout if timeout else _clamp_timeout(source))
         dom = rules.parse_dom(text)
         href = rules.extract_value(dom, toc_rule)
         if href:
@@ -225,12 +227,16 @@ def _resolve_toc_url(source, book_url):
     return book_url
 
 
-def fetch_toc(source, book_url, on_progress=None, stop=None):
-    """抓目录,返回章节列表 [(name, url), ...]。分页(option 类)一并并入。"""
+def fetch_toc(source, book_url, on_progress=None, stop=None, timeout=None, deadline=None):
+    """抓目录,返回章节列表 [(name, url), ...]。分页(option 类)一并并入。
+
+    timeout: 单次请求超时秒数(缺省按书源 respondTime 夹取 [4,12])。
+    deadline: time.time() 时间戳,超过后停止翻页(探测阶段用来限制总耗时)。
+    """
     rc = source.get("ruleContent") or {}
     if isinstance(rc, dict) and rules.uses_js_text(json.dumps(rc, ensure_ascii=False)):
         raise RuntimeError("该源正文规则依赖 JS,暂不支持")
-    toc_url = _resolve_toc_url(source, book_url)
+    toc_url = _resolve_toc_url(source, book_url, timeout)
     rt = source.get("ruleToc") or {}
     if not isinstance(rt, dict) or not rt.get("chapterList"):
         raise RuntimeError("缺少 ruleToc.chapterList")
@@ -241,13 +247,16 @@ def fetch_toc(source, book_url, on_progress=None, stop=None):
     headers = rules.parse_header(source.get("header"))
     while cur and guard < 8:
         guard += 1
+        if deadline is not None and time.time() > deadline and guard > 1:
+            break                     # 探测限时:已有首页结果,不再翻页
         try:
             req = rules.parse_request(cur, {})
             hd = dict(headers or {})
             if req.get("headers"):
                 hd.update(req["headers"])
             url, text = fetch(source.get("bookSourceName", "?"), req["url"], req["method"],
-                              req.get("body", ""), hd, _clamp_timeout(source))
+                              req.get("body", ""), hd,
+                              timeout if timeout else _clamp_timeout(source))
         except Exception as e:
             if guard == 1:
                 raise RuntimeError("目录页抓取失败: %s" % e)
@@ -345,13 +354,17 @@ def _fetch_chapter(source, url, base, headers):
     return body
 
 
-def load_book(hit, on_progress=None, stop=None, workers=8):
-    """下载整本书。on_progress(done, total, chapter_name)。返回 dict(title/author/chapters)。"""
+def load_book(hit, on_progress=None, stop=None, workers=8, toc=None):
+    """下载整本书。on_progress(done, total, chapter_name)。返回 dict(title/author/chapters)。
+
+    toc:已抓好的目录 [(name, url)]。传入则可跳过目录抓取(探测书源时用)。
+    """
     if stop is None:
         stop = threading.Event()
     source = hit["source"]
     title = hit["name"]
-    toc = fetch_toc(source, hit["book_url"], on_progress=None, stop=stop)
+    if toc is None:
+        toc = fetch_toc(source, hit["book_url"], on_progress=None, stop=stop)
     total = len(toc)
     if total == 0:
         raise RuntimeError("目录为空(可能需登录或被封)")

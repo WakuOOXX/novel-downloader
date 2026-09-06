@@ -8,21 +8,36 @@ import sys
 import threading
 import time
 import tkinter as tk
+from concurrent.futures import ThreadPoolExecutor
 from tkinter import ttk, filedialog, messagebox
 from pathlib import Path
+
+import requests
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from legado import engine, export
 from selpolicy import (MIN_DRAG, DOUBLE_MS, apply_click, apply_range,
                        apply_rubber, restore_filter)
 
+try:                                       # 校验自签名站时不刷 InsecureRequestWarning
+    from urllib3 import disable_warnings
+    disable_warnings()
+except Exception:
+    pass
+
 if getattr(sys, "frozen", False):          # PyInstaller 打包后:资源文件放 exe 同目录
     APP_DIR = Path(sys.executable).resolve().parent
 else:
     APP_DIR = Path(__file__).resolve().parent
-DEFAULT_SOURCE = APP_DIR / "bookSource.json"
+SOURCE_DIR = APP_DIR / "shuyuan"           # 书源 JSON 统一放这里
+DEFAULT_SOURCE = SOURCE_DIR / "bookSource.json"
 DEFAULT_OUT = APP_DIR / "downloads"
 STATE_FILE = APP_DIR / "sel_state.json"    # 多选模式 + 选中项记忆(见 _mem_*)
+
+# 书源校验(照 VerifyBookSource 的判定:GET bookSourceUrl,200 即有效)
+VERIFY_UA = {"user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                           "AppleWebKit/537.36 (KHTML, like Gecko) "
+                           "Chrome/114.0.0.0 Safari/537.36 Edg/114.0.1823.58"}
 
 
 class DownloadDialog:
@@ -102,8 +117,10 @@ class App:
         self.sources = []
         self.stop_search = threading.Event()
         self.stop_dl = threading.Event()
+        self.stop_verify = threading.Event()
         self.busy_search = False
         self.busy_dl = False
+        self.busy_verify = False
         self._last_key = ""
         self.var_fmt = tk.StringVar(value="epub")      # 导出格式:epub / txt(二选一)
         self.var_mode = tk.StringVar(value="single")   # 下载方式:single / batch
@@ -133,6 +150,10 @@ class App:
         e.pack(side="left", **pad)
         ttk.Button(top, text="选择…", command=self.pick_source).pack(side="left")
         ttk.Button(top, text="重新加载", command=lambda: self.reload_sources(self.var_src.get())).pack(side="left")
+        self.btn_verify = ttk.Button(top, text="✔ 校验书源", command=self.start_verify)
+        self.btn_verify.pack(side="left")
+        self.lbl_verify = ttk.Label(top, text="", foreground="#555")
+        self.lbl_verify.pack(side="left", padx=(6, 0))
 
         row2 = ttk.Frame(self.root)
         row2.pack(fill="x", padx=8, pady=2)
@@ -242,7 +263,7 @@ class App:
 
     def pick_source(self):
         p = filedialog.askopenfilename(title="选择书源文件", filetypes=[("JSON", "*.json")],
-                                        initialdir=str(APP_DIR))
+                                        initialdir=str(SOURCE_DIR))
         if p:
             self.reload_sources(p)
 
@@ -259,7 +280,72 @@ class App:
         groups = ["全部"] + [g for g, _ in engine.source_groups(self.sources)]
         self.cmb_group["values"] = groups
         self.var_group.set("全部")
+        self.lbl_verify.config(text="")
         self.log("已加载 %d 个书源: %s" % (len(self.sources), path))
+
+    # --------------------------------------------------------- 书源校验 -----
+    # 照 xin-verify-book-source 的实现:并发 GET 每个书源的 bookSourceUrl,
+    # 200 记有效、其余/异常记失效;完毕后按 URL 去重。只改本会话内存,
+    # 不回写书源文件;失效源被剔除后搜索/下载不再扫描它。
+    def _check_one(self, s):
+        if self.stop_verify.is_set():
+            return None                                          # None = 中止未检测
+        url = (s.get("bookSourceUrl") or "").strip()
+        if not url:
+            return False
+        try:
+            r = requests.get(url, headers=VERIFY_UA, timeout=5,
+                             verify=False, allow_redirects=True)
+            return r.status_code == 200
+        except Exception:
+            return False
+
+    def start_verify(self):
+        if self.busy_verify or self.busy_search or self.busy_dl:
+            return
+        if not self.sources:
+            messagebox.showwarning("提示", "请先加载书源文件")
+            return
+        self.stop_verify.clear()
+        self.busy_verify = True
+        self.btn_verify.config(state="disabled")
+        self.btn_search.config(state="disabled")
+        self.btn_dl.config(state="disabled")
+        self.btn_stop.config(state="normal")
+        self.log("开始校验 %d 个书源(并发 64 · 超时 5s · 只测连通性)…" % len(self.sources))
+        self.lbl_verify.config(text="校验中…")
+        threading.Thread(target=self._do_verify,
+                         args=(list(self.sources),), daemon=True).start()
+
+    def _do_verify(self, srcs):
+        t0 = time.time()
+        results, done = [], 0
+        pool = ThreadPoolExecutor(max_workers=64)
+        try:
+            for ok in pool.map(self._check_one, srcs):   # map 保持顺序,ok 对应 srcs[done]
+                results.append(ok)
+                done += 1
+                if done % 25 == 0 or done == len(srcs):
+                    self.q.put(("vprog", (done, len(srcs),
+                                          sum(1 for r in results if r),  # noqa: E712
+                                          sum(1 for r in results if r is False))))
+        except Exception as e:
+            self.q.put(("log", "校验异常: %s" % e))
+        finally:
+            pool.shutdown(wait=False)
+        # 失效的剔除;中止时未检测的(ok=None)原样保留
+        n_bad = sum(1 for r in results if r is False)
+        n_ok = sum(1 for r in results if r)              # noqa: E712
+        n_untested = sum(1 for r in results if r is None)
+        keep = [s for s, r in zip(srcs, results) if r is not False]
+        seen, deduped = set(), []                        # 同 URL 只留第一个
+        for s in keep:
+            u = (s.get("bookSourceUrl") or "").strip()
+            if u not in seen:
+                seen.add(u)
+                deduped.append(s)
+        self.q.put(("vres", (deduped, n_ok, n_bad, len(keep) - len(deduped),
+                             n_untested, time.time() - t0)))
 
     def pick_out(self):
         p = filedialog.askdirectory(title="选择保存目录", initialdir=str(DEFAULT_OUT))
@@ -282,7 +368,7 @@ class App:
 
     def start_search(self):
         key = self.var_key.get().strip()
-        if not key or self.busy_search:
+        if not key or self.busy_search or self.busy_verify:
             return
         if not self.sources:
             messagebox.showwarning("提示", "请先加载书源文件")
@@ -337,6 +423,7 @@ class App:
     def stop_all(self):
         self.stop_search.set()
         self.stop_dl.set()
+        self.stop_verify.set()
 
     def _set_busy(self, b):
         self.busy_search = b
@@ -385,7 +472,10 @@ class App:
         try:
             with open(STATE_FILE, encoding="utf-8") as f:
                 d = json.load(f)
-            return {"multi": True, "selected": list(d.get("selected") or [])}
+            # JSON 数组读回来是 list,而 _hit_key 产出 tuple;统一成 tuple 才能进集合
+            sel = [tuple(k) if isinstance(k, list) else k
+                   for k in (d.get("selected") or [])]
+            return {"multi": True, "selected": sel}
         except Exception:
             # 无记忆/文件损坏:空选中。多选交互常开(单击仍是单选,无害)。
             return {"multi": True, "selected": []}
@@ -421,7 +511,7 @@ class App:
         if not keep:
             return
         by_key = {}
-        for iid, idx in self.idx2iid.items():
+        for idx, iid in self.idx2iid.items():
             if 0 <= idx < len(self.hits):
                 by_key[self._hit_key(self.hits[idx])] = iid
         want = [by_key[k] for k in keep if k in by_key]
@@ -724,7 +814,7 @@ class App:
 
     # ---------------------------------------------------- 下载 ---------------
     def start_download(self):
-        if self.busy_dl:
+        if self.busy_dl or self.busy_verify:
             return
         idxs = self._sel_indices()
         if not idxs:
@@ -897,8 +987,32 @@ class App:
             self.lbl_hits.config(text="共找到 %d 条结果" % len(self.hits))
             self.log("搜索完成,共 %d 条%s" % (len(self.hits),
                     " · 按相关度排序" if fuzzy else ""))
-            self._try_restore_selection()
+            try:                     # 恢复选中即使出错,也必须解开搜索按钮
+                self._try_restore_selection()
+            finally:
+                self._set_busy(False)
+        elif kind == "vprog":
+            done, total, ng, nb = payload
+            self.lbl_verify.config(text="校验中 %d/%d · 有效 %d · 失效 %d"
+                                   % (done, total, ng, nb))
+        elif kind == "vres":
+            good, n_ok, bad, dup, untested, elapsed = payload
+            self.busy_verify = False
             self._set_busy(False)
+            self.btn_verify.config(state="normal")
+            self.sources = good
+            groups = ["全部"] + [g for g, _ in engine.source_groups(self.sources)]
+            self.cmb_group["values"] = groups
+            if self.var_group.get() not in groups:
+                self.var_group.set("全部")
+            self.lbl_verify.config(text="有效 %d · 失效 %d" % (n_ok, bad))
+            msg = "校验完成:有效 %d · 失效 %d · 耗时 %.0fs" % (n_ok, bad, elapsed)
+            if dup:
+                msg += " · 去重移除 %d" % dup
+            if untested:
+                msg += " · 未检测 %d(已中止,保留)" % untested
+            self.log(msg)
+            self.log("失效源已剔除,本次会话内搜索/下载只扫有效源;点\"重新加载\"可还原。")
         elif kind == "dlprog":
             done, total, msg = payload
             self.pbar.config(maximum=max(total, 1), value=done)

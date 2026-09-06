@@ -13,7 +13,7 @@ Windows 桌面应用 · Python + tkinter · 自研 Legado 规则引擎
 
 [🌐 项目官网](https://WakuOOXX.github.io/novel-downloader/) ·
 [⬇️ 下载 Windows 版](https://github.com/WakuOOXX/novel-downloader/releases/latest) ·
-[📖 技术文档](技术文档.md)
+[📖 技术文档](docs/技术文档.md)
 
 </div>
 
@@ -52,7 +52,7 @@ Windows 桌面应用 · Python + tkinter · 自研 Legado 规则引擎
 - 导出格式 EPUB / TXT 二选一，不重复占空间。
 - 正文逐章抓取，支持目录分页拼接；重名书自动加书源后缀防覆盖。
 
-> 实现细节（并发与超时策略、规则语法兼容矩阵、EPUB 内部结构）见[技术文档](技术文档.md)。
+> 实现细节（并发与超时策略、规则语法兼容矩阵、EPUB 内部结构）见[技术文档](docs/技术文档.md)。
 
 ## 🖼️ 界面预览
 
@@ -86,7 +86,7 @@ pip install requests beautifulsoup4 lxml
 python app.py        # 或双击 启动下载器.bat（pythonw 启动，无控制台窗口）
 ```
 
-注意：解释器必须带 tkinter，python.org 官方安装包默认包含；部分精简版 Python 没有，启动会报 `ModuleNotFoundError`。排查细节见[技术文档 §2](技术文档.md)。
+注意：解释器必须带 tkinter，python.org 官方安装包默认包含；部分精简版 Python 没有，启动会报 `ModuleNotFoundError`。排查细节见[技术文档 §2](docs/技术文档.md)。
 
 ## 📖 使用指南
 
@@ -149,14 +149,14 @@ python app.py        # 或双击 启动下载器.bat（pythonw 启动，无控�
 **源码启动报 `ModuleNotFoundError: tkinter`？**
 换官方安装的 Python（默认带 tkinter），再 `pip install requests beautifulsoup4 lxml`。
 
-更多排查项见[技术文档 §11](技术文档.md)。
+更多排查项见[技术文档 §11](docs/技术文档.md)。
 
 ## 🧩 二次开发
 
-仓库里只有运行所需的代码。规则引擎、导出、交互层的实现说明都在[技术文档](技术文档.md)：
+仓库里只有运行所需的代码。规则引擎、导出、交互层的实现说明都在[技术文档](docs/技术文档.md)：
 
-- [§6 规则 DSL 引擎](技术文档.md)：支持与不支持的语法清单
-- [§12 扩展指引](技术文档.md)：加选择器、加导出格式、加交互怎么下手
+- [§6 规则 DSL 引擎](docs/技术文档.md)：支持与不支持的语法清单
+- [§12 扩展指引](docs/技术文档.md)：加选择器、加导出格式、加交互怎么下手
 - 打包单文件 exe：
 
 ```bash

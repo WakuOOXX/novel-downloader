@@ -50,6 +50,78 @@ def _clamp_timeout(src):
     return min(max(rt, 4), 12)
 
 
+def _clean_name(name):
+    """书名清洗:混入"作者:/最新章节"等后续字段时截断,去"TXT下载"类尾巴。"""
+    n = re.sub(r"\s{2,}", " ", (name or "")).strip()
+    for marker in ("作者:", "作者：", "最新章节"):
+        i = n.find(marker)
+        if i > 0:
+            n = n[:i].strip(" :：-—|/，,。")
+    changed = True
+    while changed and len(n) > 4:
+        changed = False
+        for suf in ("TXT下载", "TXT全本", "全文阅读", "最新章节", "无弹窗",
+                    "免费下载", "(完结)", "（完结）", "TXT", "下载", "连载"):
+            if n.endswith(suf):
+                n = n[:-len(suf)].strip(" :：-—|/，,。")
+                changed = True
+    return n
+
+
+# 分类混入这些词、或超长(正常分类就是"玄幻/都市"这类短词),判定为错列文本,置空
+_KIND_JUNK = ("作者", "最新", "章节", "字数", "点击", "更新", "状态",
+              "简介", "目录", "下载", "连载")
+
+
+def _clean_kind(name, kind):
+    """分类清洗:去"分类:"前缀;错列整段/与书名同文/超长时置空。"""
+    k = re.sub(r"^\s*分\s*类\s*[:：>》\s]*", "", kind or "").strip()
+    k = re.sub(r"\s{2,}", " ", k)
+    if not k or k == name:
+        return ""
+    if len(k) > 12 or any(m in k for m in _KIND_JUNK):
+        return ""
+    return k
+
+
+def _clean_last(name, last):
+    """最新章节清洗:误抽成"书名+作者…"整块时剥离书名,仍带作者等错列文本则置空。"""
+    t = re.sub(r"\s{2,}", " ", (last or "")).strip()
+    if not t:
+        return ""
+    if name and t.startswith(name):
+        t = t[len(name):].strip(" :：-—|/，,。")
+    if not t or "作者" in t or len(t) > 60:
+        return ""
+    return t
+
+
+# 作者字段混入这些词,说明规则抽到了整行文本(书名+分类+章节),不可救,置空
+_AUTHOR_JUNK = ("分类", "作者", "最新", "章节", "字数", "点击", "更新",
+                "状态", "简介", "目录")
+
+
+def _clean_author(name, author):
+    """作者字段清洗(部分站点规则抽错列/带前缀):
+    - 去"作者:"类前缀与"著"尾缀;
+    - 作者与书名相同、或是书名开头一长串(抽错列)时置空;
+    - 混入分类/章节等整行文本(见 _AUTHOR_JUNK)或超长时置空;
+    - 规整空白。
+    """
+    a = re.sub(r"^\s*作\s*者\s*[:：>》\s]*", "", author or "").strip()
+    a = re.sub(r"\s*[/｜|]?\s*著\s*$", "", a).strip()
+    a = re.sub(r"\s{2,}", " ", a)
+    if not a or a == name:
+        return ""
+    if a.startswith("《") or a.endswith("》"):     # 作者栏误抽成书名
+        return ""
+    if len(a) >= 6 and name.startswith(a):       # 作者栏误抽成书名前缀
+        return ""
+    if len(a) > 20 or any(m in a for m in _AUTHOR_JUNK):
+        return ""                                # 整段错列文本,不可救
+    return a
+
+
 def make_key_variants(key: str):
     """模糊搜索关键词变体:按分隔符取首段、去尾字、截前段。不含原词、至少 2 字。"""
     key = (key or "").strip()
@@ -128,7 +200,7 @@ def search_sources(sources, key, on_progress=None, stop=None, workers=24,
                 items = rules.extract_list(dom, rs.get("bookList") or "")
                 for it in items:
                     try:
-                        name = rules.extract_value(it, rs.get("name") or "")
+                        name = _clean_name(rules.extract_value(it, rs.get("name") or ""))
                         if not name:
                             continue
                         bu = rules.extract_value(it, rs.get("bookUrl") or "")
@@ -137,10 +209,10 @@ def search_sources(sources, key, on_progress=None, stop=None, workers=24,
                         out.append({
                             "source": s,
                             "name": name,
-                            "author": rules.extract_value(it, rs.get("author") or ""),
-                            "kind": rules.extract_value(it, rs.get("kind") or ""),
+                            "author": _clean_author(name, rules.extract_value(it, rs.get("author") or "")),
+                            "kind": _clean_kind(name, rules.extract_value(it, rs.get("kind") or "")),
                             "book_url": urljoin(url, bu),
-                            "last_chapter": rules.extract_value(it, rs.get("lastChapter") or ""),
+                            "last_chapter": _clean_last(name, rules.extract_value(it, rs.get("lastChapter") or "")),
                             "intro": rules.extract_value(it, rs.get("intro") or ""),
                         })
                     except Exception:

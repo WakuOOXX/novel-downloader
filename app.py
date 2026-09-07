@@ -184,6 +184,8 @@ class App:
         self.var_fuzzy = tk.BooleanVar(value=True)
         cb = ttk.Checkbutton(row2, text="模糊搜索", variable=self.var_fuzzy)
         cb.pack(side="left", padx=(8, 0))
+        self.var_rel = tk.BooleanVar(value=True)
+        ttk.Checkbutton(row2, text="只看相关结果", variable=self.var_rel).pack(side="left", padx=(8, 0))
         self.btn_stop = ttk.Button(row2, text="停止", command=self.stop_all, state="disabled")
         self.btn_stop.pack(side="left", **pad)
         self.lbl_progress = ttk.Label(row2, text="", foreground="#555")
@@ -514,19 +516,53 @@ class App:
             hits = []
         self.q.put(("sres", (len(hits), fuzzy)))
 
+    def _rel_terms(self):
+        """相关性判定词:关键词 + 其模糊变体(变体重试产生的结果也算相关)。"""
+        k = (self._last_key or self.var_key.get() or "").strip()
+        if not k:
+            return []
+        terms = [k] + engine.make_key_variants(k)
+        return [t.lower() for t in terms if len(t) >= 2]
+
+    def _relevant(self, h):
+        """只看相关结果:书名/作者/分类/简介至少一处包含关键词或其变体。
+
+        很多小站无视搜索词、返回热门书充数,本地不过滤就会混进无关结果。
+        """
+        terms = self._rel_terms()
+        if not terms:
+            return True
+        text = " ".join((h.get("name") or "", h.get("author") or "",
+                         h.get("kind") or "", h.get("intro") or "")).lower()
+        return any(t in text for t in terms)
+
     def _score_hit(self, h):
-        """相关度:精确同名 > 键含于书名 > 书名含于键 > 字符相似度。"""
+        """相关度:书名同名/含词 > 作者含词 > 分类含词 > 简介含词 > 字符相似度。"""
         import difflib
-        n, k = h["name"] or "", self._last_key or ""
+        k = (self._last_key or "").strip()
         if not k:
             return 0
-        if k == n:
-            return 100
-        if k in n:
-            return 80
-        if n in k:
-            return 60
-        return difflib.SequenceMatcher(None, k, n).ratio() * 40
+        kl = k.lower()
+        name = (h.get("name") or "").lower()
+        s = 0
+        if kl == name:
+            s += 100
+        elif kl in name:
+            s += 80
+        else:
+            for v in self._rel_terms():          # 变体命中书名也给分
+                if v != kl and v in name:
+                    s += 60
+                    break
+        if kl in (h.get("author") or "").lower():
+            s += 40
+        if kl in (h.get("kind") or "").lower():
+            s += 25
+        if kl in (h.get("intro") or "").lower():
+            s += 15
+        if s == 0:
+            s += difflib.SequenceMatcher(None, kl, name).ratio() * 30
+        return s
 
     def stop_all(self):
         self.stop_search.set()
@@ -1094,6 +1130,8 @@ class App:
                    x["source"]["bookSourceName"] == h["source"]["bookSourceName"]
                    for x in self.hits):
                 return
+            if self.var_rel.get() and not self._relevant(h):
+                return                                    # 无关结果不上屏
             self.hits.append(h)
             i = len(self.hits) - 1
             iid = self.tree.insert("", "end",

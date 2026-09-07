@@ -12,3 +12,4 @@ probe_hits.json
 sel_state.json
 smoke_result.txt
 shuyuan/
+*.good.json

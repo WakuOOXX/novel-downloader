@@ -32,12 +32,20 @@ else:
 SOURCE_DIR = APP_DIR / "shuyuan"           # 书源 JSON 统一放这里
 DEFAULT_SOURCE = SOURCE_DIR / "bookSource.json"
 DEFAULT_OUT = APP_DIR / "downloads"
-STATE_FILE = APP_DIR / "sel_state.json"    # 多选模式 + 选中项记忆(见 _mem_*)
+STATE_FILE = APP_DIR / "sel_state.json"    # 多选/选中项记忆 + 校验原始表路径(见 _mem_*)
 
 # 书源校验(照 VerifyBookSource 的判定:GET bookSourceUrl,200 即有效)
 VERIFY_UA = {"user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                            "AppleWebKit/537.36 (KHTML, like Gecko) "
                            "Chrome/114.0.0.0 Safari/537.36 Edg/114.0.1823.58"}
+
+
+def good_table_path(origin: Path) -> Path:
+    """原始全量表对应的有效书源表:<原名>.good.json(与 verify_sources.py 输出一致)。"""
+    name = origin.name
+    if name.lower().endswith(".json"):
+        return origin.with_name(name[:-5] + ".good.json")
+    return origin.with_name(origin.stem + ".good.json")
 
 
 class DownloadDialog:
@@ -114,7 +122,10 @@ class App:
 
         self.q = queue.Queue()
         self.hits = []
-        self.sources = []
+        self.sources = []              # 工作书源(搜索/下载用;校验后 = good 表内容)
+        self.verify_origin = ""        # 原始全量书源文件路径(校验专用,重启不丢)
+        self.verify_done = {}          # {"origin": 路径, "time": 完成时刻}
+                                       # ——只有本程序校验跑完生成的 good 表才自动采用
         self.stop_search = threading.Event()
         self.stop_dl = threading.Event()
         self.stop_verify = threading.Event()
@@ -127,6 +138,8 @@ class App:
 
         # —— 多选交互状态(资源管理器式,常开;见 MultiSelect 相关方法)——
         mem = self._mem_load()
+        self.verify_origin = mem.get("verify_origin") or ""
+        self.verify_done = mem.get("verify_done") or {}
         self._drag = None          # 进行中的橡皮筋状态 dict 或 None
         self._press = None         # 左键按下信息
         self._last_click = None    # 上次单击信息,用于双击判定
@@ -267,26 +280,89 @@ class App:
         if p:
             self.reload_sources(p)
 
+    @staticmethod
+    def _fmt_time(t):
+        try:
+            return time.strftime("%m-%d %H:%M", time.localtime(float(t)))
+        except Exception:
+            return "?"
+
     def reload_sources(self, path):
         if not path or not os.path.exists(path):
             self.log("书源文件不存在: %s" % path)
             return
         try:
-            self.sources = engine.load_sources(path)
+            srcs = engine.load_sources(path)
         except Exception as e:
             messagebox.showerror("加载失败", str(e))
             return
-        self.var_src.set(path)
+        p = Path(path)
+        if p.name.lower().endswith(".good.json"):
+            # 手动选有效表 = 明确要用它搜索/下载
+            self.sources = srcs
+            self.var_src.set(path)
+            self._set_groups()
+            self.lbl_verify.config(text="有效书源表:%d 个源" % len(srcs))
+            self.log("已手动加载有效书源表 %d 个源: %s" % (len(srcs), path))
+            if not (self.verify_origin and os.path.exists(self.verify_origin)):
+                self.log("⚠ 未找到原始全量表记忆,点\"校验书源\"前请先选择原始全量表。")
+            return
+        # 原始全量表 = 校验专用。搜索/下载是否用 good 表:
+        # 只采用"本程序校验完整跑完生成"的表(verify_done 记录且路径匹配),
+        # 外部/旧表不自动采用,避免拿过期结果当有效列表。
+        self.var_src.set(path)                               # 输入框始终显示用户选的文件
+        self.verify_origin = str(p)
+        self._mem_save_origin()
+        good = good_table_path(p)
+        trusted = (self.verify_done or {}).get("origin") == str(p)
+        if good.exists() and trusted:
+            try:
+                self.sources = engine.load_sources(str(good))
+                self.lbl_verify.config(text="有效表 %d 源 · 校验于 %s"
+                                       % (len(self.sources),
+                                          self._fmt_time(self.verify_done.get("time"))))
+                self.log("已加载原始全量表 %d 个源: %s" % (len(srcs), path))
+                self.log("搜索/下载使用有效表 %s(%d 源,校验于 %s);"
+                         "点\"校验书源\"重扫原始全量表。"
+                         % (good.name, len(self.sources),
+                            self._fmt_time(self.verify_done.get("time"))))
+            except Exception:
+                self.sources = srcs
+                self.lbl_verify.config(text="全量表 %d 源(有效表读取失败)" % len(srcs))
+                self.log("有效表 %s 读取失败,搜索/下载暂用全量表。" % good.name)
+        else:
+            self.sources = srcs
+            if good.exists():
+                self.lbl_verify.config(text="全量表 %d 源(旧表未采用)" % len(srcs))
+                self.log("已加载原始全量表 %d 个源: %s" % (len(srcs), path))
+                self.log("发现旧有效表 %s(非本程序校验生成),未采用;"
+                         "搜索/下载暂扫全量,点\"校验书源\"跑完即可生成新表。"
+                         % good.name)
+            else:
+                self.lbl_verify.config(text="全量表 %d 源" % len(srcs))
+                self.log("已加载 %d 个书源: %s(尚无有效书源表,可点\"校验书源\"生成)"
+                         % (len(srcs), path))
+        self._set_groups()
+
+    def _set_groups(self):
         groups = ["全部"] + [g for g, _ in engine.source_groups(self.sources)]
         self.cmb_group["values"] = groups
-        self.var_group.set("全部")
-        self.lbl_verify.config(text="")
-        self.log("已加载 %d 个书源: %s" % (len(self.sources), path))
+        if self.var_group.get() not in groups:
+            self.var_group.set("全部")
 
     # --------------------------------------------------------- 书源校验 -----
-    # 照 xin-verify-book-source 的实现:并发 GET 每个书源的 bookSourceUrl,
-    # 200 记有效、其余/异常记失效;完毕后按 URL 去重。只改本会话内存,
-    # 不回写书源文件;失效源被剔除后搜索/下载不再扫描它。
+    # 两张表分工:原始全量表 = 校验专用(每次点按钮都重扫它,量多命中率高);
+    # <原名>.good.json = 有效书源表,校验跑完后生成,搜索/下载只用它。
+    # 照 xin-verify-book-source 的判定:并发 GET bookSourceUrl,200 即有效。
+    def _verify_origin_path(self):
+        """校验用的原始全量文件:当前选的是原始表就直接用;选的是 good 表则走记忆。"""
+        p = self.var_src.get()
+        if p and os.path.exists(p) and not Path(p).name.lower().endswith(".good.json"):
+            return Path(p)
+        if self.verify_origin and os.path.exists(self.verify_origin):
+            return Path(self.verify_origin)
+        return None
+
     def _check_one(self, s):
         if self.stop_verify.is_set():
             return None                                          # None = 中止未检测
@@ -303,21 +379,34 @@ class App:
     def start_verify(self):
         if self.busy_verify or self.busy_search or self.busy_dl:
             return
-        if not self.sources:
-            messagebox.showwarning("提示", "请先加载书源文件")
+        origin = self._verify_origin_path()
+        if not origin:
+            messagebox.showwarning("提示", "未找到原始全量书源文件,"
+                                           "请先在\"书源文件\"中选择它")
             return
+        try:
+            srcs = engine.load_sources(str(origin))
+        except Exception as e:
+            messagebox.showerror("加载失败", "读取原始全量书源失败:\n%s" % e)
+            return
+        if not srcs:
+            messagebox.showwarning("提示", "原始全量表里没有书源: %s" % origin)
+            return
+        self.verify_origin = str(origin)
+        self._mem_save_origin()
         self.stop_verify.clear()
         self.busy_verify = True
         self.btn_verify.config(state="disabled")
         self.btn_search.config(state="disabled")
         self.btn_dl.config(state="disabled")
         self.btn_stop.config(state="normal")
-        self.log("开始校验 %d 个书源(并发 64 · 超时 5s · 只测连通性)…" % len(self.sources))
+        self.log("开始校验原始全量表 %s:%d 个书源(并发 64 · 超时 5s · 只测连通性)…"
+                 % (origin.name, len(srcs)))
         self.lbl_verify.config(text="校验中…")
         threading.Thread(target=self._do_verify,
-                         args=(list(self.sources),), daemon=True).start()
+                         args=(srcs, origin), daemon=True).start()
 
-    def _do_verify(self, srcs):
+    def _do_verify(self, srcs, origin):
         t0 = time.time()
         results, done = [], 0
         pool = ThreadPoolExecutor(max_workers=64)
@@ -333,19 +422,38 @@ class App:
             self.q.put(("log", "校验异常: %s" % e))
         finally:
             pool.shutdown(wait=False)
-        # 失效的剔除;中止时未检测的(ok=None)原样保留
         n_bad = sum(1 for r in results if r is False)
         n_ok = sum(1 for r in results if r)              # noqa: E712
         n_untested = sum(1 for r in results if r is None)
-        keep = [s for s, r in zip(srcs, results) if r is not False]
-        seen, deduped = set(), []                        # 同 URL 只留第一个
-        for s in keep:
-            u = (s.get("bookSourceUrl") or "").strip()
-            if u not in seen:
-                seen.add(u)
-                deduped.append(s)
-        self.q.put(("vres", (deduped, n_ok, n_bad, len(keep) - len(deduped),
-                             n_untested, time.time() - t0)))
+        elapsed = time.time() - t0
+        table = good_table_path(origin)
+        if n_untested:                                       # 中途停止 → 本次作废
+            self.q.put(("vres", ("aborted", None, n_ok, n_bad, n_untested,
+                                 elapsed, str(table))))
+            return
+        if n_ok == 0:                                        # 全失效,疑似断网
+            self.q.put(("vres", ("allbad", None, n_ok, n_bad, n_untested,
+                                 elapsed, str(table))))
+            return
+        seen, good = set(), []                               # 有效 + 同 URL 去重
+        for s, r in zip(srcs, results):
+            if r is not False:
+                u = (s.get("bookSourceUrl") or "").strip()
+                if u not in seen:
+                    seen.add(u)
+                    good.append(s)
+        try:                                                 # 原子写:先临时再替换
+            tmp = table.with_name(table.name + ".tmp")
+            tmp.write_text(json.dumps(good, ensure_ascii=False, indent=2),
+                           encoding="utf-8")
+            os.replace(tmp, table)
+        except Exception as e:
+            self.q.put(("log", "✘ 有效书源表写入失败: %s" % e))
+            self.q.put(("vres", ("writefail", None, n_ok, n_bad, n_untested,
+                                 elapsed, str(table))))
+            return
+        self.q.put(("vres", ("ok", good, n_ok, n_bad, n_untested,
+                             elapsed, str(table))))
 
     def pick_out(self):
         p = filedialog.askdirectory(title="选择保存目录", initialdir=str(DEFAULT_OUT))
@@ -475,19 +583,36 @@ class App:
             # JSON 数组读回来是 list,而 _hit_key 产出 tuple;统一成 tuple 才能进集合
             sel = [tuple(k) if isinstance(k, list) else k
                    for k in (d.get("selected") or [])]
-            return {"multi": True, "selected": sel}
+            return {"multi": True, "selected": sel,
+                    "verify_origin": d.get("verify_origin") or "",
+                    "verify_done": d.get("verify_done") or {}}
         except Exception:
             # 无记忆/文件损坏:空选中。多选交互常开(单击仍是单选,无害)。
-            return {"multi": True, "selected": []}
+            return {"multi": True, "selected": [], "verify_origin": "",
+                    "verify_done": {}}
 
     def _mem_save(self, keys=None):
         try:
             if keys is None:
                 keys = self._current_keys()
-            data = {"multi": True, "selected": [[s, u] for s, u in keys]}
+            data = {"multi": True, "selected": [[s, u] for s, u in keys],
+                    "verify_origin": getattr(self, "verify_origin", ""),
+                    "verify_done": getattr(self, "verify_done", {})}
             with open(STATE_FILE, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False)
             self._mem_last = {"multi": True, "selected": list(keys)}
+        except Exception:
+            pass
+
+    def _mem_save_origin(self):
+        """只更新 verify_origin/verify_done 字段;不动选中记忆(启动早期树还未填充)。"""
+        try:
+            sel = self._mem_last.get("selected") or [] if self._mem_last else []
+            data = {"multi": True, "selected": [[s, u] for s, u in sel],
+                    "verify_origin": self.verify_origin,
+                    "verify_done": self.verify_done}
+            with open(STATE_FILE, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False)
         except Exception:
             pass
 
@@ -996,23 +1121,32 @@ class App:
             self.lbl_verify.config(text="校验中 %d/%d · 有效 %d · 失效 %d"
                                    % (done, total, ng, nb))
         elif kind == "vres":
-            good, n_ok, bad, dup, untested, elapsed = payload
+            status, good, n_ok, bad, untested, elapsed, table_path = payload
             self.busy_verify = False
             self._set_busy(False)
             self.btn_verify.config(state="normal")
-            self.sources = good
-            groups = ["全部"] + [g for g, _ in engine.source_groups(self.sources)]
-            self.cmb_group["values"] = groups
-            if self.var_group.get() not in groups:
-                self.var_group.set("全部")
-            self.lbl_verify.config(text="有效 %d · 失效 %d" % (n_ok, bad))
-            msg = "校验完成:有效 %d · 失效 %d · 耗时 %.0fs" % (n_ok, bad, elapsed)
-            if dup:
-                msg += " · 去重移除 %d" % dup
-            if untested:
-                msg += " · 未检测 %d(已中止,保留)" % untested
-            self.log(msg)
-            self.log("失效源已剔除,本次会话内搜索/下载只扫有效源;点\"重新加载\"可还原。")
+            if status == "ok":
+                self.sources = good
+                self.verify_done = {"origin": self.verify_origin, "time": time.time()}
+                self._mem_save_origin()
+                self._set_groups()
+                self.lbl_verify.config(text="有效 %d · 失效 %d · 表已更新 %s"
+                                       % (n_ok, bad, self._fmt_time(self.verify_done["time"])))
+                self.log("校验完成:有效 %d · 失效 %d · 耗时 %.0fs" % (n_ok, bad, elapsed))
+                self.log("有效书源表已生成: %s — 之后搜索/下载只扫这 %d 个源;"
+                         "再点\"校验书源\"会重新扫原始全量表。" % (table_path, len(good)))
+            elif status == "aborted":
+                self.lbl_verify.config(text="校验已中止(旧表保留)")
+                self.log("校验已中止:未生成/未更新有效书源表,"
+                         "继续沿用现有表;未检测 %d 个。" % untested)
+            elif status == "allbad":
+                self.lbl_verify.config(text="全部失效(旧表保留)")
+                self.log("⚠ 原始全量表 %d 个源全部失效,疑似断网/网络异常,"
+                         "本次不生成表,沿用现有表。" % bad)
+            else:                                            # writefail
+                self.lbl_verify.config(text="有效 %d · 表写入失败" % n_ok)
+                self.log("✘ 校验完成(有效 %d · 失效 %d)但写入 %s 失败,"
+                         "沿用现有表。" % (n_ok, bad, table_path))
         elif kind == "dlprog":
             done, total, msg = payload
             self.pbar.config(maximum=max(total, 1), value=done)

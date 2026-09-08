@@ -462,19 +462,9 @@ class App:
         self._mem_save_core()
 
     # --------------------------------------------------------- 书源校验 -----
-    # 两张表分工:原始全量表 = 校验专用(每次点按钮都重扫它,量多命中率高);
-    # <原名>.good.json = 有效书源表,校验跑完后生成,搜索/下载只用它。
+    # 多文件按序校验:每个勾选的原始表独立 64 并发探测 → 各自写 .good.json;
+    # 停止 = 当前文件中止 + 后续不再开始(已完成的 good 表保留)。
     # 照 xin-verify-book-source 的判定:并发 GET bookSourceUrl,200 即有效。
-    def _verify_origin_path(self):
-        """校验用的原始全量文件:返回第一个勾选且存在的原始表(commit 3 改为逐文件)。"""
-        for fn in self.checked_files:
-            p = SOURCE_DIR / fn
-            if p.exists():
-                return p
-        if self.verify_origin and os.path.exists(self.verify_origin):
-            return Path(self.verify_origin)
-        return None
-
     def _check_one(self, s):
         if self.stop_verify.is_set():
             return None                                          # None = 中止未检测
@@ -491,81 +481,98 @@ class App:
     def start_verify(self):
         if self.busy_verify or self.busy_search or self.busy_dl:
             return
-        origin = self._verify_origin_path()
-        if not origin:
-            messagebox.showwarning("提示", "未找到原始全量书源文件,"
-                                           "请先在\"书源文件\"中选择它")
+        # 收集勾选且存在的原始表
+        files = []
+        for fn in self.checked_files:
+            p = SOURCE_DIR / fn
+            if p.exists():
+                files.append((fn, p))
+            else:
+                self.log("⚠ 校验跳过缺失文件: %s" % fn)
+        if not files:
+            messagebox.showwarning("提示", "没有可校验的书源文件。"
+                                           "请先在\"书源文件\"下拉中勾选。")
             return
-        try:
-            srcs = engine.load_sources(str(origin))
-        except Exception as e:
-            messagebox.showerror("加载失败", "读取原始全量书源失败:\n%s" % e)
-            return
-        if not srcs:
-            messagebox.showwarning("提示", "原始全量表里没有书源: %s" % origin)
-            return
-        self.verify_origin = str(origin)
-        self._mem_save_core()
         self.stop_verify.clear()
         self.busy_verify = True
         self.btn_verify.config(state="disabled")
         self.btn_search.config(state="disabled")
         self.btn_dl.config(state="disabled")
         self.btn_stop.config(state="normal")
-        self.log("开始校验原始全量表 %s:%d 个书源(并发 64 · 超时 5s · 只测连通性)…"
-                 % (origin.name, len(srcs)))
-        self.lbl_verify.config(text="校验中…")
-        threading.Thread(target=self._do_verify,
-                         args=(srcs, origin), daemon=True).start()
+        n_files = len(files)
+        self.log("开始校验 %d 个书源文件(并发 64 · 超时 5s · 只测连通性)…" % n_files)
+        self.lbl_verify.config(text="校验中 · 文件 0/%d" % n_files)
+        threading.Thread(target=self._do_verify, args=(files,), daemon=True).start()
 
-    def _do_verify(self, srcs, origin):
-        t0 = time.time()
-        results, done = [], 0
-        pool = ThreadPoolExecutor(max_workers=64)
-        try:
-            for ok in pool.map(self._check_one, srcs):   # map 保持顺序,ok 对应 srcs[done]
-                results.append(ok)
-                done += 1
-                if done % 25 == 0 or done == len(srcs):
-                    self.q.put(("vprog", (done, len(srcs),
-                                          sum(1 for r in results if r),  # noqa: E712
-                                          sum(1 for r in results if r is False))))
-        except Exception as e:
-            self.q.put(("log", "校验异常: %s" % e))
-        finally:
-            pool.shutdown(wait=False)
-        n_bad = sum(1 for r in results if r is False)
-        n_ok = sum(1 for r in results if r)              # noqa: E712
-        n_untested = sum(1 for r in results if r is None)
-        elapsed = time.time() - t0
-        table = good_table_path(origin)
-        if n_untested:                                       # 中途停止 → 本次作废
-            self.q.put(("vres", ("aborted", None, n_ok, n_bad, n_untested,
-                                 elapsed, str(table))))
-            return
-        if n_ok == 0:                                        # 全失效,疑似断网
-            self.q.put(("vres", ("allbad", None, n_ok, n_bad, n_untested,
-                                 elapsed, str(table))))
-            return
-        seen, good = set(), []                               # 有效 + 同 URL 去重
-        for s, r in zip(srcs, results):
-            if r is not False:
-                u = (s.get("bookSourceUrl") or "").strip()
-                if u not in seen:
-                    seen.add(u)
-                    good.append(s)
-        try:                                                 # 原子写:先临时再替换
-            tmp = table.with_name(table.name + ".tmp")
-            tmp.write_text(json.dumps(good, ensure_ascii=False, indent=2),
-                           encoding="utf-8")
-            os.replace(tmp, table)
-        except Exception as e:
-            self.q.put(("log", "✘ 有效书源表写入失败: %s" % e))
-            self.q.put(("vres", ("writefail", None, n_ok, n_bad, n_untested,
-                                 elapsed, str(table))))
-            return
-        self.q.put(("vres", ("ok", good, n_ok, n_bad, n_untested,
-                             elapsed, str(table))))
+    def _do_verify(self, files):
+        """逐文件校验循环。files = [(filename, Path), ...]"""
+        t_total = time.time()
+        n_files = len(files)
+        tot_ok, tot_bad = 0, 0
+        aborted = False
+        for fi, (fn, origin) in enumerate(files):
+            if self.stop_verify.is_set():
+                aborted = True
+                break
+            self.q.put(("vfile", (fi + 1, n_files, fn)))
+            try:
+                srcs = engine.load_sources(str(origin))
+            except Exception as e:
+                self.q.put(("log", "✘ 文件 %s 读取失败,跳过: %s" % (fn, e)))
+                continue
+            if not srcs:
+                self.q.put(("log", "⚠ 文件 %s 无书源,跳过。" % fn))
+                continue
+            t0 = time.time()
+            results, done = [], 0
+            pool = ThreadPoolExecutor(max_workers=64)
+            try:
+                for ok in pool.map(self._check_one, srcs):
+                    results.append(ok)
+                    done += 1
+                    if done % 25 == 0 or done == len(srcs):
+                        n_ok = sum(1 for r in results if r)
+                        n_bad = sum(1 for r in results if r is False)
+                        self.q.put(("vprog", (fi + 1, n_files, fn,
+                                              done, len(srcs), n_ok, n_bad)))
+            except Exception as e:
+                self.q.put(("log", "校验异常(%s): %s" % (fn, e)))
+            finally:
+                pool.shutdown(wait=False)
+            n_bad = sum(1 for r in results if r is False)
+            n_ok = sum(1 for r in results if r)
+            n_untested = sum(1 for r in results if r is None)
+            elapsed = time.time() - t0
+            tot_ok += n_ok
+            tot_bad += n_bad
+            table = good_table_path(origin)
+            if n_untested:
+                self.q.put(("log", "文件 %s 校验中止(未检测 %d 个)" % (fn, n_untested)))
+                aborted = True
+                break
+            if n_ok == 0:
+                self.q.put(("log", "⚠ 文件 %s 全部 %d 个源失效(耗时 %.0fs),未生成表。"
+                                    % (fn, n_bad, elapsed)))
+                continue
+            seen, good = set(), []
+            for s, r in zip(srcs, results):
+                if r is not False:
+                    u = (s.get("bookSourceUrl") or "").strip()
+                    if u not in seen:
+                        seen.add(u)
+                        good.append(s)
+            try:
+                tmp = table.with_name(table.name + ".tmp")
+                tmp.write_text(json.dumps(good, ensure_ascii=False, indent=2),
+                               encoding="utf-8")
+                os.replace(tmp, table)
+            except Exception as e:
+                self.q.put(("log", "✘ %s 有效表写入失败: %s" % (fn, e)))
+                continue
+            self.q.put(("vfile_done", (fn, str(origin), n_ok, n_bad, elapsed)))
+        elapsed_total = time.time() - t_total
+        self.q.put(("vdone", (n_files, tot_ok, tot_bad, elapsed_total, aborted)))
+
 
     def pick_out(self):
         p = filedialog.askdirectory(title="选择保存目录", initialdir=str(DEFAULT_OUT))
@@ -1385,37 +1392,36 @@ class App:
                 self._try_restore_selection()
             finally:
                 self._set_busy(False)
+        elif kind == "vfile":
+            fi, n_files, fn = payload
+            self.lbl_verify.config(text="校验中 · 文件 %d/%d · %s" % (fi, n_files, fn))
+            self.log("开始校验文件 %d/%d: %s" % (fi, n_files, fn))
         elif kind == "vprog":
-            done, total, ng, nb = payload
-            self.lbl_verify.config(text="校验中 %d/%d · 有效 %d · 失效 %d"
-                                   % (done, total, ng, nb))
-        elif kind == "vres":
-            status, good, n_ok, bad, untested, elapsed, table_path = payload
+            fi, n_files, fn, done, total, ng, nb = payload
+            self.lbl_verify.config(text="校验中 文件 %d/%d · %s · %d/%d · 有效 %d · 失效 %d"
+                                   % (fi, n_files, fn, done, total, ng, nb))
+        elif kind == "vfile_done":
+            fn, origin, n_ok, n_bad, elapsed = payload
+            now = time.time()
+            self.verify_dones[fn] = {"origin": origin, "time": now}
+            self._mem_save_core()
+            self.log("✔ 文件 %s 校验完成:有效 %d · 失效 %d · 耗时 %.0fs"
+                     % (fn, n_ok, n_bad, elapsed))
+        elif kind == "vdone":
+            n_files, tot_ok, tot_bad, elapsed, aborted = payload
             self.busy_verify = False
             self._set_busy(False)
             self.btn_verify.config(state="normal")
-            if status == "ok":
-                self.sources = good
-                self.verify_done = {"origin": self.verify_origin, "time": time.time()}
-                self._mem_save_core()
-                self._set_groups()
-                self.lbl_verify.config(text="有效 %d · 失效 %d · 表已更新 %s"
-                                       % (n_ok, bad, self._fmt_time(self.verify_done["time"])))
-                self.log("校验完成:有效 %d · 失效 %d · 耗时 %.0fs" % (n_ok, bad, elapsed))
-                self.log("有效书源表已生成: %s — 之后搜索/下载只扫这 %d 个源;"
-                         "再点\"校验书源\"会重新扫原始全量表。" % (table_path, len(good)))
-            elif status == "aborted":
-                self.lbl_verify.config(text="校验已中止(旧表保留)")
-                self.log("校验已中止:未生成/未更新有效书源表,"
-                         "继续沿用现有表;未检测 %d 个。" % untested)
-            elif status == "allbad":
-                self.lbl_verify.config(text="全部失效(旧表保留)")
-                self.log("⚠ 原始全量表 %d 个源全部失效,疑似断网/网络异常,"
-                         "本次不生成表,沿用现有表。" % bad)
-            else:                                            # writefail
-                self.lbl_verify.config(text="有效 %d · 表写入失败" % n_ok)
-                self.log("✘ 校验完成(有效 %d · 失效 %d)但写入 %s 失败,"
-                         "沿用现有表。" % (n_ok, bad, table_path))
+            self._reload_all()                  # good 表更新后重载合并源
+            if aborted:
+                self.lbl_verify.config(text="校验已中止 · 有效 %d · 失效 %d" % (tot_ok, tot_bad))
+                self.log("校验已中止 · 总有效 %d · 总失效 %d · 耗时 %.0fs"
+                         % (tot_ok, tot_bad, elapsed))
+            else:
+                self.lbl_verify.config(text="已校验 %d 文件 · 有效 %d · 失效 %d · 耗时 %.0fs"
+                                       % (n_files, tot_ok, tot_bad, elapsed))
+                self.log("全部校验完成: %d 文件 · 有效 %d · 失效 %d · 耗时 %.0fs"
+                         % (n_files, tot_ok, tot_bad, elapsed))
         elif kind == "dlprog":
             done, total, msg = payload
             self.pbar.config(maximum=max(total, 1), value=done)

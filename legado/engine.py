@@ -92,8 +92,12 @@ def search_sources(sources, key, on_progress=None, stop=None, workers=24,
       dict(source/name/author/book_url/...),并注记 _group_key/_src_count/
       _group_first(同书分组信息,同组行在返回列表中相邻)。
     - on_progress(done, total, msg):每完成一个源回调一次(整批源只预筛一次)。
-    - on_hit(hit):每轮搜索结束后按合并结果整批回调(供 GUI 增量上屏,
-      回调条目同样带同书分组注记)。
+    - on_hit(hit):每命中一条即时回调(供 GUI 增量上屏)。
+      【取舍(2026-09-09 定案)】即时回调的条目**不带**同书分组注记
+      (跨源合并需等整轮结果才能算),GUI 过程态用 fallback key 自成一组,
+      无害;搜索结束事件里 GUI 必做 merge_hits(dedupe_hits(hits)) 整表
+      重建,分组/相邻/排序以最终态为准。换来的是结果逐条即时可见,
+      而非整轮结束才一次性上屏。
     - fuzzy=True:直搜 0 命中时,自动用 make_key_variants 生成的变体,仅对
       "本轮网络存活的源"重试,直到有命中或变体耗尽。
     """
@@ -166,6 +170,12 @@ def search_sources(sources, key, on_progress=None, stop=None, workers=24,
                 if ok:
                     round_alive.append(s)
                 round_hits.extend(hs)
+                if on_hit:
+                    for h in hs:
+                        try:
+                            on_hit(h)
+                        except Exception:
+                            pass
                 if on_progress:
                     try:
                         on_progress(done, total, "%s%s ×%d" % (label, s.get("bookSourceName", "?"), len(hs)))
@@ -179,19 +189,6 @@ def search_sources(sources, key, on_progress=None, stop=None, workers=24,
 
     alive = list(usable)
     all_hits, alive = run_round(alive, key, "")
-
-    def emit(hits):
-        """按轮合并后整批回调(供 GUI 增量上屏):同书行带 _group_key/_src_count,
-        GUI 才能做到"同书相邻 + N源标记"而不用等搜索全部结束。"""
-        if not on_hit or not hits:
-            return
-        for h in merge_hits(dedupe_hits(hits)):
-            try:
-                on_hit(h)
-            except Exception:
-                pass
-
-    emit(all_hits)
     # 模糊兜底:直搜无果 → 变体重试(仅对本轮存活源,每变体至多一轮)
     if fuzzy and not all_hits and alive and not stop.is_set():
         for v in make_key_variants(key):

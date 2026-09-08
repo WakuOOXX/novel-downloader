@@ -13,3 +13,4 @@ sel_state.json
 smoke_result.txt
 shuyuan/
 *.good.json
+.zcode/

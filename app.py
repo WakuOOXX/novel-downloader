@@ -123,10 +123,12 @@ class App:
         self.q = queue.Queue()
         self.hits = []
         self._gtag = {}                # 同书分组 → 底色交替序号(见 _insert_hit_row)
-        self.sources = []              # 工作书源(搜索/下载用;校验后 = good 表内容)
-        self.verify_origin = ""        # 原始全量书源文件路径(校验专用,重启不丢)
-        self.verify_done = {}          # {"origin": 路径, "time": 完成时刻}
-                                       # ——只有本程序校验跑完生成的 good 表才自动采用
+        self.sources = []              # 工作书源(搜索/下载用)= 勾选文件合并后的源列表
+        self.checked_files = []        # 勾选的书源文件名(相对 shuyuan/,保序,重启不丢)
+        self.verify_dones = {}         # {文件名: {"origin": 路径, "time": 完成时刻}}
+                                       # ——每文件一条;只有本程序校验跑完生成的 good 表才采用
+        self.verify_origin = ""        # 旧单文件字段:仅供一次性迁移读取,不再新增语义
+        self.verify_done = {}
         self.stop_search = threading.Event()
         self.stop_dl = threading.Event()
         self.stop_verify = threading.Event()
@@ -138,6 +140,12 @@ class App:
         mem = self._mem_load()
         self.verify_origin = mem.get("verify_origin") or ""
         self.verify_done = mem.get("verify_done") or {}
+        # 勾选文件清单:记忆里有就用(含空 = 用户全不选);无字段(旧记忆/全新)→ 迁移或默认
+        checked = mem.get("sources")
+        self.checked_files = list(checked) if checked is not None else \
+            ([Path(self.verify_origin).name] if self.verify_origin
+             else [DEFAULT_SOURCE.name])
+        self.verify_dones = dict(mem.get("verify_dones") or {})
         self._mem_last = mem       # 记忆缓存(含 selected key 列表)
 
         # 顶部勾选框 + 下载弹窗选项:默认值 = 上次记忆(取消过的保持取消);
@@ -157,7 +165,7 @@ class App:
         self._build_ui()
         self._anchor = None        # Shift 连续选锚点行(资源管理器语义)
         self.root.after(120, self._drain)
-        self.reload_sources(DEFAULT_SOURCE)
+        self._reload_all()
         self._restore_pending = bool(mem.get("selected"))   # 搜索结果到达后尝试恢复
 
     # ------------------------------------------------------------- UI -------
@@ -324,7 +332,7 @@ class App:
         # 外部/旧表不自动采用,避免拿过期结果当有效列表。
         self.var_src.set(path)                               # 输入框始终显示用户选的文件
         self.verify_origin = str(p)
-        self._mem_save_origin()
+        self._mem_save_core()
         good = good_table_path(p)
         trusted = (self.verify_done or {}).get("origin") == str(p)
         if good.exists() and trusted:
@@ -361,6 +369,60 @@ class App:
         self.cmb_group["values"] = groups
         if self.var_group.get() not in groups:
             self.var_group.set("全部")
+
+    def _reload_all(self):
+        """按勾选文件清单(shuyuan/ 下)逐文件加载并合并成工作源 self.sources。
+
+        good 信任逐文件独立判定:verify_dones[文件名].origin 匹配该文件当前路径
+        且其 .good.json 存在 → 搜索/下载用 good 表;否则该文件用全量表
+        (外部/旧表不自动采用)。缺失/读取失败的文件保留勾选,跳过并日志提示。
+        """
+        merged, n_good = [], 0
+        for fn in self.checked_files:
+            p = SOURCE_DIR / fn
+            if not p.exists():
+                self.log("⚠ 书源文件缺失,已跳过(勾选保留): %s" % fn)
+                continue
+            try:
+                srcs = engine.load_sources(str(p))
+            except Exception as e:
+                self.log("✘ 书源文件读取失败,已跳过: %s(%s)" % (fn, e))
+                continue
+            done = self.verify_dones.get(fn) or {}
+            good = good_table_path(p)
+            use = srcs
+            if done.get("origin") == str(p) and good.exists():
+                try:
+                    use = engine.load_sources(str(good))
+                    n_good += 1
+                    self.log("已加载 %s:有效表 %s(%d 源 · 校验于 %s)"
+                             % (fn, good.name, len(use),
+                                self._fmt_time(done.get("time"))))
+                except Exception:
+                    use = srcs
+                    self.log("有效表 %s 读取失败,%s 暂用全量 %d 源。"
+                             % (good.name, fn, len(srcs)))
+            else:
+                hint = ("发现旧有效表 %s(非本程序校验生成),未采用" % good.name) \
+                    if good.exists() else "尚无有效表,可点\"校验书源\"生成"
+                self.log("已加载 %s:全量 %d 源(%s)" % (fn, len(srcs), hint))
+            for s in use:
+                s["_file"] = fn                     # 运行时归属标记,不写回书源 JSON
+            merged.extend(use)
+        self.sources = merged
+        if self.checked_files and merged:
+            self.log("合并工作源 %d 个(勾选 %d 文件 · %d 个用有效表)。"
+                     % (len(merged), len(self.checked_files), n_good))
+            if len(merged) > 5000:
+                self.log("⚠ 合并源数较大(%d),建议先\"校验书源\"再搜索。" % len(merged))
+        elif self.checked_files:
+            self.log("⚠ 勾选的 %d 个文件都没有可用书源。" % len(self.checked_files))
+        else:
+            self.log("未勾选任何书源文件;在\"书源文件\"下拉中勾选后自动加载。")
+        self._set_groups()
+        self.lbl_verify.config(text="勾选 %d 文件 · 合并 %d 源"
+                               % (len(self.checked_files), len(merged)))
+        self._mem_save_core()
 
     # --------------------------------------------------------- 书源校验 -----
     # 两张表分工:原始全量表 = 校验专用(每次点按钮都重扫它,量多命中率高);
@@ -405,7 +467,7 @@ class App:
             messagebox.showwarning("提示", "原始全量表里没有书源: %s" % origin)
             return
         self.verify_origin = str(origin)
-        self._mem_save_origin()
+        self._mem_save_core()
         self.stop_verify.clear()
         self.busy_verify = True
         self.btn_verify.config(state="disabled")
@@ -677,9 +739,22 @@ class App:
             # JSON 数组读回来是 list,而 _hit_key 产出 tuple;统一成 tuple 才能进集合
             sel = [tuple(k) if isinstance(k, list) else k
                    for k in (d.get("selected") or [])]
+            # 勾选文件清单:无 sources 字段(旧记忆)→ 从旧 verify_origin 一次性迁移
+            sources = d.get("sources")
+            if sources is None:
+                sources = ([Path(d["verify_origin"]).name]
+                           if d.get("verify_origin") else None)
+            dones = d.get("verify_dones")
+            if not isinstance(dones, dict):
+                dones = {}
+            if sources and not dones and isinstance(d.get("verify_done"), dict) \
+                    and d["verify_done"].get("origin"):
+                dones = {sources[0]: d["verify_done"]}   # 旧单条校验记录 → 按文件挂
             return {"multi": True, "selected": sel,
                     "verify_origin": d.get("verify_origin") or "",
                     "verify_done": d.get("verify_done") or {},
+                    "sources": [str(x) for x in sources] if sources else sources,
+                    "verify_dones": dones,
                     "fuzzy": bool(d.get("fuzzy", True)),
                     "rel": bool(d.get("rel", True)),
                     "fmt": d.get("fmt") or "epub",
@@ -687,15 +762,17 @@ class App:
         except Exception:
             # 无记忆/文件损坏:空选中 + 出厂默认选项。多选交互常开(单击仍是单选,无害)。
             return {"multi": True, "selected": [], "verify_origin": "",
-                    "verify_done": {}, "fuzzy": True, "rel": True,
+                    "verify_done": {}, "sources": None, "verify_dones": {},
+                    "fuzzy": True, "rel": True,
                     "fmt": "epub", "mode": "single"}
 
     def _mem_save(self, keys=None):
         """选中变化后的落盘入口(keys=None 时取当前树选中)。"""
         self._mem_flush(keys)
 
-    def _mem_save_origin(self):
-        """书源校验记录变化后的落盘入口;只用缓存选中,避免启动早期空树清空记忆。"""
+    def _mem_save_core(self):
+        """书源状态(勾选文件/校验记录)变化后的落盘入口;只用缓存选中,
+        避免启动早期空树清空记忆。"""
         if self._mem_last:
             keys = list(self._mem_last.get("selected") or [])
         else:
@@ -720,6 +797,9 @@ class App:
                 keys = self._current_keys()
             data = {"multi": True,
                     "selected": [[s, u] for s, u in keys],
+                    "sources": list(self.checked_files),
+                    "verify_dones": dict(self.verify_dones),
+                    # 旧单文件字段:过渡期继续读写(commit 3 校验多文件化后停止写入)
                     "verify_origin": getattr(self, "verify_origin", ""),
                     "verify_done": getattr(self, "verify_done", {}),
                     "fuzzy": bool(self.var_fuzzy.get()),
@@ -730,6 +810,8 @@ class App:
                 json.dump(data, f, ensure_ascii=False)
             self._mem_last = {"multi": True,
                               "selected": list(keys),
+                              "sources": data["sources"],
+                              "verify_dones": data["verify_dones"],
                               "verify_origin": data["verify_origin"],
                               "verify_done": data["verify_done"],
                               "fuzzy": data["fuzzy"],
@@ -740,12 +822,20 @@ class App:
             pass
 
     def _mem_clear(self):
-        """清除记忆入口:选中与勾选项(顶部/下载弹窗)一起恢复出厂并落盘。"""
+        """清除记忆入口:选中与勾选项(顶部/下载弹窗)一起恢复出厂并落盘。
+
+        书源勾选回到默认单文件(bookSource.json),校验记录一并清除;
+        verify_origin/verify_done 为旧字段,只保留缓存不再写入新语义。
+        """
         try:
             STATE_FILE.unlink()
         except Exception:
             pass
+        self.checked_files = [DEFAULT_SOURCE.name]
+        self.verify_dones = {}
         self._mem_last = {"multi": True, "selected": [],
+                          "sources": list(self.checked_files),
+                          "verify_dones": {},
                           "verify_origin": self.verify_origin,
                           "verify_done": self.verify_done,
                           "fuzzy": True, "rel": True,
@@ -757,6 +847,7 @@ class App:
             except Exception:
                 pass
         self._apply_selection([], notify=False)
+        self._reload_all()
         messagebox.showinfo("清除记忆", "已清除保存的选中与选项状态(恢复默认)。")
 
     def _try_restore_selection(self):
@@ -1267,7 +1358,7 @@ class App:
             if status == "ok":
                 self.sources = good
                 self.verify_done = {"origin": self.verify_origin, "time": time.time()}
-                self._mem_save_origin()
+                self._mem_save_core()
                 self._set_groups()
                 self.lbl_verify.config(text="有效 %d · 失效 %d · 表已更新 %s"
                                        % (n_ok, bad, self._fmt_time(self.verify_done["time"])))

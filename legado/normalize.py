@@ -169,3 +169,37 @@ def dedupe_hits(hits):
         seen.add(k)
         uniq.append(h)
     return uniq
+
+
+# ----------------------------------------------------- 跨文件书源去重 ----
+def source_identity(s):
+    """书源稳定身份:(书源名, 站点URL)。两字段皆空的源视为无法识别。"""
+    name = (s.get("bookSourceName") or "").strip()
+    url = (s.get("bookSourceUrl") or "").strip()
+    return (name, url)
+
+
+def dedupe_sources(sources):
+    """跨文件合并重复书源(2026-09-09 拍板新增)。
+
+    规则:按 source_identity 去重,首个保留;若后到者来自有效表
+    (s["_from_good"]=True)而已保留者不是,则后者顶替(校验过的优先);
+    两字段皆空的源不参与去重,原样保留。返回 (去重后列表, 去重个数)。
+    """
+    out, seen, n_dup = [], {}, 0
+    for s in sources:
+        k = source_identity(s)
+        if k == ("", ""):
+            out.append(s)
+            continue
+        prev_i = seen.get(k)
+        if prev_i is None:
+            seen[k] = len(out)
+            out.append(s)
+            continue
+        n_dup += 1
+        prev = out[prev_i]
+        if s.get("_from_good") and not prev.get("_from_good"):
+            out[prev_i] = s          # 有效表来源顶替全量表来源
+            seen[k] = prev_i
+    return out, n_dup

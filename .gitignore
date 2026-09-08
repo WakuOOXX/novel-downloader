@@ -14,3 +14,16 @@ smoke_result.txt
 shuyuan/
 *.good.json
 .zcode/
+
+# IDE / OS / 私人本地文件(不入库)
+.idea/
+.vscode/
+*.swp
+*.tmp
+desktop.ini
+.DS_Store
+.venv/
+venv/
+*.db
+*.sqlite3
+test_outputs/

@@ -155,7 +155,8 @@ class App:
         self.var_rel = tk.BooleanVar(value=bool(mem.get("rel", True)))
         self.var_fmt = tk.StringVar(value=mem.get("fmt") or "epub")      # epub / txt
         self.var_mode = tk.StringVar(value=mem.get("mode") or "single")  # single / batch
-        for _v in (self.var_fuzzy, self.var_rel, self.var_fmt, self.var_mode):
+        self.var_domain = tk.StringVar(value=mem.get("domain") or "自动")  # 搜索域
+        for _v in (self.var_fuzzy, self.var_rel, self.var_fmt, self.var_mode, self.var_domain):
             _v.trace_add("write", self._mem_save_opts)
 
         # —— 多选交互状态(资源管理器式,常开;见 MultiSelect 相关方法)——
@@ -195,11 +196,15 @@ class App:
         self.var_group = tk.StringVar(value="全部")
         self.cmb_group = ttk.Combobox(row2, textvariable=self.var_group, width=26, state="readonly")
         self.cmb_group.pack(side="left", **pad)
-        ttk.Label(row2, text="书名:").pack(side="left", padx=(14, 2))
+        ttk.Label(row2, text="搜索:").pack(side="left", padx=(14, 2))
         self.var_key = tk.StringVar()
-        self.ent_key = ttk.Entry(row2, textvariable=self.var_key, width=26)
+        self.ent_key = ttk.Entry(row2, textvariable=self.var_key, width=22)
         self.ent_key.pack(side="left", **pad)
         self.ent_key.bind("<Return>", lambda ev: self.start_search())
+        self.cmb_domain = ttk.Combobox(row2, textvariable=self.var_domain, width=5,
+                                       state="readonly",
+                                       values=["自动", "书名", "作者", "分类"])
+        self.cmb_domain.pack(side="left")
         self.btn_search = ttk.Button(row2, text="🔍 搜索", command=self.start_search)
         self.btn_search.pack(side="left")
         cb = ttk.Checkbutton(row2, text="模糊搜索", variable=self.var_fuzzy)
@@ -615,8 +620,13 @@ class App:
         self.lbl_hits.config(text="搜索中…")
         srcs = self._chosen_sources()
         fuzzy = self.var_fuzzy.get()
-        self.log("开始搜索《%s》,分组[%s],候选 %d 源,%s" %
-                 (key, self.var_group.get(), len(srcs), "模糊开启" if fuzzy else "精确模式"))
+        domain = self.var_domain.get()
+        domain_hint = " · 域[%s]" % domain if domain != "自动" else ""
+        self.log("开始搜索《%s》,分组[%s],候选 %d 源,%s%s" %
+                 (key, self.var_group.get(), len(srcs),
+                  "模糊开启" if fuzzy else "精确模式", domain_hint))
+        if domain in ("作者", "分类"):
+            self.log("💡 网络层按书名发起搜索,%s为返回结果内的本地过滤。" % domain)
         threading.Thread(target=self._do_search, args=(key, srcs, fuzzy), daemon=True).start()
 
     def _do_search(self, key, srcs, fuzzy):
@@ -643,13 +653,26 @@ class App:
         return [t.lower() for t in terms if len(t) >= 2]
 
     def _relevant(self, h):
-        """只看相关结果:书名/作者/分类/简介至少一处包含关键词或其变体。
+        """只看相关结果:按当前域(自动/书名/作者/分类)判定是否保留。
 
+        自动:书名/作者/分类/简介至少一处命中(现有行为)。
+        书名/作者/分类:仅该域命中关键词或其变体时保留。
         很多小站无视搜索词、返回热门书充数,本地不过滤就会混进无关结果。
         """
         terms = self._rel_terms()
         if not terms:
             return True
+        domain = self.var_domain.get()
+        if domain == "书名":
+            name = (h.get("name") or "").lower()
+            return any(t in name for t in terms)
+        elif domain == "作者":
+            author = (h.get("author") or "").lower()
+            return any(t in author for t in terms)
+        elif domain == "分类":
+            kind = (h.get("kind") or "").lower()
+            return any(t in kind for t in terms)
+        # 自动:四域任一命中
         text = " ".join((h.get("name") or "", h.get("author") or "",
                          h.get("kind") or "", h.get("intro") or "")).lower()
         return any(t in text for t in terms)
@@ -803,13 +826,14 @@ class App:
                     "fuzzy": bool(d.get("fuzzy", True)),
                     "rel": bool(d.get("rel", True)),
                     "fmt": d.get("fmt") or "epub",
-                    "mode": d.get("mode") or "single"}
+                    "mode": d.get("mode") or "single",
+                    "domain": d.get("domain") or "自动"}
         except Exception:
             # 无记忆/文件损坏:空选中 + 出厂默认选项。多选交互常开(单击仍是单选,无害)。
             return {"multi": True, "selected": [], "verify_origin": "",
                     "verify_done": {}, "sources": None, "verify_dones": {},
                     "fuzzy": True, "rel": True,
-                    "fmt": "epub", "mode": "single"}
+                    "fmt": "epub", "mode": "single", "domain": "自动"}
 
     def _mem_save(self, keys=None):
         """选中变化后的落盘入口(keys=None 时取当前树选中)。"""
@@ -850,7 +874,8 @@ class App:
                     "fuzzy": bool(self.var_fuzzy.get()),
                     "rel": bool(self.var_rel.get()),
                     "fmt": self.var_fmt.get() or "epub",
-                    "mode": self.var_mode.get() or "single"}
+                    "mode": self.var_mode.get() or "single",
+                    "domain": self.var_domain.get() or "自动"}
             with open(STATE_FILE, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False)
             self._mem_last = {"multi": True,
@@ -862,7 +887,8 @@ class App:
                               "fuzzy": data["fuzzy"],
                               "rel": data["rel"],
                               "fmt": data["fmt"],
-                              "mode": data["mode"]}
+                              "mode": data["mode"],
+                              "domain": data["domain"]}
         except Exception:
             pass
 
@@ -884,9 +910,10 @@ class App:
                           "verify_origin": self.verify_origin,
                           "verify_done": self.verify_done,
                           "fuzzy": True, "rel": True,
-                          "fmt": "epub", "mode": "single"}
+                          "fmt": "epub", "mode": "single", "domain": "自动"}
         for _v, _d in ((self.var_fuzzy, True), (self.var_rel, True),
-                       (self.var_fmt, "epub"), (self.var_mode, "single")):
+                       (self.var_fmt, "epub"), (self.var_mode, "single"),
+                       (self.var_domain, "自动")):
             try:
                 _v.set(_d)         # 触发 trace → _mem_save_opts → 落盘全新状态
             except Exception:

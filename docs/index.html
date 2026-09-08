@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>小说下载器 — 聚合搜索 3000+ 书源,多选框选批量下载,导出 EPUB / TXT</title>
-<meta name="description" content="开源 Windows 桌面工具。输入书名,自动跳过失效书源、模糊换词重试;多选/框选批量下载,被封源自动换源,导出 EPUB 或 TXT。">
+<title>小说下载器 v1.5 — 聚合搜索 3000+ 书源,多书源文件合并去重,三域搜索,导出 EPUB / TXT</title>
+<meta name="description" content="开源 Windows 桌面工具。输入书名,自动跳过失效书源、模糊换词重试;多书源文件清单合并(自动去重)、一键校验书源、书名/作者/分类三域搜索,多选/框选批量下载,导出 EPUB 或 TXT。">
 <style>
   :root{
     --bg:#f6f7fb; --card:#ffffff; --line:#e5e8f0;
@@ -183,7 +183,7 @@
 <header class="hero" id="top">
   <div class="hero-bg"></div>
   <div class="wrap">
-    <span class="eyebrow"><span class="dot-pulse"></span>v1.0.0 已发布 · Windows 免安装</span>
+    <span class="eyebrow"><span class="dot-pulse"></span>v1.5 已发布 · 源码已同步 · Windows 免安装</span>
     <h1>全网小说,一次搜索<br><span class="g">下载整本,导出即读</span></h1>
     <p class="sub">把书名输入进去,剩下交给程序:3000+ 书源并发搜索、失效的自动跳过、搜不到就换词重试;单击选一本,框选/Ctrl/Shift 批量选,导出 EPUB 或 TXT。</p>
     <div class="hero-cta">
@@ -278,6 +278,16 @@
         <div><h3>纯 Python 规则引擎,看得懂、改得动</h3>
         <p>自研引擎解析书源的 class / XPath / JSONPath 选择器、正则替换与多页正文;依赖 JS 脚本或登录态的源自动跳过,不报错不中断。</p></div>
       </div>
+      <div class="f">
+        <span class="f-ic"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l7 3v6c0 5-3.5 8.5-7 10-3.5-1.5-7-5-7-10V5z"/><polyline points="9 12 11 14 15 10"/></svg></span>
+        <div><h3>一键校验书源 + 三域搜索</h3>
+        <p>点「校验书源」对清单里的文件逐个体检,生成有效书源表,之后搜索只扫活源。搜索框支持<b>书名 / 作者 / 分类</b>三域过滤,同书跨源结果自动聚合成一组展示。</p></div>
+      </div>
+      <div class="f">
+        <span class="f-ic"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><line x1="12" y1="11" x2="12" y2="15"/><line x1="10" y1="13" x2="14" y2="13"/></svg></span>
+        <div><h3>多书源文件,一个清单管理</h3>
+        <p>「书源文件」下拉把多个书源 JSON 收进同一清单,合并搜索时<b>自动去重重复书源</b>(同名同站保留一份,校验过的优先);清单与选项都记忆,重启不丢,行尾一键移出、随时从任意文件夹加回。</p></div>
+      </div>
     </div>
   </div>
 </section>
@@ -342,7 +352,7 @@
       <h2>打开就能用,不折腾</h2>
       <p>Windows 10 / 11 免安装运行,下载即用</p>
       <div class="hero-cta" style="margin-top:0">
-        <a class="btn btn-w" href="https://github.com/WakuOOXX/novel-downloader/releases/latest">⬇ 下载 v1.0.0 (zip 23MB)</a>
+        <a class="btn btn-w" href="https://github.com/WakuOOXX/novel-downloader/releases/latest">⬇ 下载 Windows 版 (zip · 源码已到 v1.5)</a>
         <a class="btn btn-o" href="https://github.com/WakuOOXX/novel-downloader" target="_blank" rel="noopener">GitHub 仓库 ↗</a>
       </div>
     </div>

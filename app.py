@@ -16,6 +16,7 @@ import requests
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from legado import engine, export
+from legado.normalize import merge_hits, dedupe_hits
 from selpolicy import (MIN_DRAG, DOUBLE_MS, apply_click, apply_range,
                        apply_rubber, restore_filter)
 
@@ -175,11 +176,14 @@ class App:
         top.pack(fill="x", padx=8, pady=6)
 
         ttk.Label(top, text="书源文件:").pack(side="left")
-        self.var_src = tk.StringVar()
-        e = ttk.Entry(top, textvariable=self.var_src, width=40)
-        e.pack(side="left", **pad)
-        ttk.Button(top, text="选择…", command=self.pick_source).pack(side="left")
-        ttk.Button(top, text="重新加载", command=lambda: self.reload_sources(self.var_src.get())).pack(side="left")
+        self._src_menu_vars = {}     # 文件名 → tk.BooleanVar(菜单勾选用,每次重建菜单刷新)
+        self.mb_src = ttk.Menubutton(top, text="选择…", width=26)
+        self.mb_src.pack(side="left", **pad)
+        self.src_menu = tk.Menu(self.mb_src, tearoff=0)
+        self.mb_src["menu"] = self.src_menu
+        self._src_menu_dirty = True  # 下次弹出前需重扫目录
+        self.src_menu.bind("<Map>", lambda e: self._menu_populate())
+        ttk.Button(top, text="打开目录", command=self._open_src_dir).pack(side="left")
         self.btn_verify = ttk.Button(top, text="✔ 校验书源", command=self.start_verify)
         self.btn_verify.pack(side="left")
         self.lbl_verify = ttk.Label(top, text="", foreground="#555")
@@ -294,11 +298,100 @@ class App:
     def log(self, s):
         self.q.put(("log", s))
 
-    def pick_source(self):
-        p = filedialog.askopenfilename(title="选择书源文件", filetypes=[("JSON", "*.json")],
-                                        initialdir=str(SOURCE_DIR))
-        if p:
-            self.reload_sources(p)
+    def _menu_populate(self):
+        """重扫 shuyuan/ 勾选文件菜单(只列原始表,过滤校验产物)。"""
+        try:
+            self.src_menu.delete(0, "end")
+        except Exception:
+            pass
+        self._src_menu_vars.clear()
+        try:
+            src_dir = SOURCE_DIR
+            all_json = sorted(f.name for f in src_dir.iterdir()
+                              if f.suffix == ".json"
+                              and not f.name.endswith((".good.json", ".error.json")))
+        except Exception:
+            all_json = []
+        # 全选 / 全不选
+        self.src_menu.add_command(label="全选", command=self._src_select_all)
+        self.src_menu.add_command(label="全不选", command=self._src_select_none)
+        self.src_menu.add_separator()
+        for fn in all_json:
+            var = tk.BooleanVar(value=(fn in self.checked_files))
+            missing = not (SOURCE_DIR / fn).exists()
+            label = ("⚠ %s(缺失)" % fn) if missing else fn
+            self.src_menu.add_checkbutton(
+                label=label, variable=var,
+                command=lambda f=fn, v=var: self._toggle_file(f, v))
+            self._src_menu_vars[fn] = var
+        # 记忆里勾了但目录里已删的文件:显示并标红(不自动改勾选)
+        for fn in list(self.checked_files):
+            if fn not in self._src_menu_vars:
+                var = tk.BooleanVar(value=True)
+                self.src_menu.add_checkbutton(
+                    label="⚠ %s(缺失)" % fn, variable=var,
+                    command=lambda f=fn, v=var: self._toggle_file(f, v))
+                self._src_menu_vars[fn] = var
+        self.src_menu.add_separator()
+        self.src_menu.add_command(label="选择其他文件…", command=self._pick_other_source)
+        self._update_mb_text()
+
+    def _update_mb_text(self):
+        n = len(self.checked_files)
+        self.mb_src.config(text="已勾选 %d" % n if n else "请选择")
+
+    def _toggle_file(self, fn, var):
+        if var.get():
+            if fn not in self.checked_files:
+                self.checked_files.append(fn)
+        else:
+            try:
+                self.checked_files.remove(fn)
+            except ValueError:
+                pass
+        self._reload_all()
+
+    def _src_select_all(self):
+        for fn, var in self._src_menu_vars.items():
+            var.set(True)
+            if fn not in self.checked_files:
+                self.checked_files.append(fn)
+        self._reload_all()
+
+    def _src_select_none(self):
+        for var in self._src_menu_vars.values():
+            var.set(False)
+        self.checked_files.clear()
+        self._reload_all()
+
+    def _pick_other_source(self):
+        """选择 JSON 文件 → 复制进 SOURCE_DIR/ → 自动勾选。"""
+        p = filedialog.askopenfilename(title="选择书源 JSON 文件",
+                                       filetypes=[("JSON", "*.json")],
+                                       initialdir=str(SOURCE_DIR))
+        if not p:
+            return
+        src = Path(p)
+        dest = SOURCE_DIR / src.name
+        if src.resolve() != dest.resolve():
+            try:
+                import shutil
+                shutil.copy2(str(src), str(dest))
+                self.log("已复制 %s → %s" % (src.name, dest))
+            except Exception as e:
+                messagebox.showerror("复制失败", str(e))
+                return
+        if src.name not in self.checked_files:
+            self.checked_files.append(src.name)
+        self._src_menu_dirty = True
+        self._reload_all()
+
+    def _open_src_dir(self):
+        SOURCE_DIR.mkdir(parents=True, exist_ok=True)
+        try:
+            os.startfile(str(SOURCE_DIR))
+        except Exception:
+            pass
 
     @staticmethod
     def _fmt_time(t):
@@ -306,63 +399,6 @@ class App:
             return time.strftime("%m-%d %H:%M", time.localtime(float(t)))
         except Exception:
             return "?"
-
-    def reload_sources(self, path):
-        if not path or not os.path.exists(path):
-            self.log("书源文件不存在: %s" % path)
-            return
-        try:
-            srcs = engine.load_sources(path)
-        except Exception as e:
-            messagebox.showerror("加载失败", str(e))
-            return
-        p = Path(path)
-        if p.name.lower().endswith(".good.json"):
-            # 手动选有效表 = 明确要用它搜索/下载
-            self.sources = srcs
-            self.var_src.set(path)
-            self._set_groups()
-            self.lbl_verify.config(text="有效书源表:%d 个源" % len(srcs))
-            self.log("已手动加载有效书源表 %d 个源: %s" % (len(srcs), path))
-            if not (self.verify_origin and os.path.exists(self.verify_origin)):
-                self.log("⚠ 未找到原始全量表记忆,点\"校验书源\"前请先选择原始全量表。")
-            return
-        # 原始全量表 = 校验专用。搜索/下载是否用 good 表:
-        # 只采用"本程序校验完整跑完生成"的表(verify_done 记录且路径匹配),
-        # 外部/旧表不自动采用,避免拿过期结果当有效列表。
-        self.var_src.set(path)                               # 输入框始终显示用户选的文件
-        self.verify_origin = str(p)
-        self._mem_save_core()
-        good = good_table_path(p)
-        trusted = (self.verify_done or {}).get("origin") == str(p)
-        if good.exists() and trusted:
-            try:
-                self.sources = engine.load_sources(str(good))
-                self.lbl_verify.config(text="有效表 %d 源 · 校验于 %s"
-                                       % (len(self.sources),
-                                          self._fmt_time(self.verify_done.get("time"))))
-                self.log("已加载原始全量表 %d 个源: %s" % (len(srcs), path))
-                self.log("搜索/下载使用有效表 %s(%d 源,校验于 %s);"
-                         "点\"校验书源\"重扫原始全量表。"
-                         % (good.name, len(self.sources),
-                            self._fmt_time(self.verify_done.get("time"))))
-            except Exception:
-                self.sources = srcs
-                self.lbl_verify.config(text="全量表 %d 源(有效表读取失败)" % len(srcs))
-                self.log("有效表 %s 读取失败,搜索/下载暂用全量表。" % good.name)
-        else:
-            self.sources = srcs
-            if good.exists():
-                self.lbl_verify.config(text="全量表 %d 源(旧表未采用)" % len(srcs))
-                self.log("已加载原始全量表 %d 个源: %s" % (len(srcs), path))
-                self.log("发现旧有效表 %s(非本程序校验生成),未采用;"
-                         "搜索/下载暂扫全量,点\"校验书源\"跑完即可生成新表。"
-                         % good.name)
-            else:
-                self.lbl_verify.config(text="全量表 %d 源" % len(srcs))
-                self.log("已加载 %d 个书源: %s(尚无有效书源表,可点\"校验书源\"生成)"
-                         % (len(srcs), path))
-        self._set_groups()
 
     def _set_groups(self):
         groups = ["全部"] + [g for g, _ in engine.source_groups(self.sources)]
@@ -422,6 +458,7 @@ class App:
         self._set_groups()
         self.lbl_verify.config(text="勾选 %d 文件 · 合并 %d 源"
                                % (len(self.checked_files), len(merged)))
+        self._update_mb_text()
         self._mem_save_core()
 
     # --------------------------------------------------------- 书源校验 -----
@@ -429,10 +466,11 @@ class App:
     # <原名>.good.json = 有效书源表,校验跑完后生成,搜索/下载只用它。
     # 照 xin-verify-book-source 的判定:并发 GET bookSourceUrl,200 即有效。
     def _verify_origin_path(self):
-        """校验用的原始全量文件:当前选的是原始表就直接用;选的是 good 表则走记忆。"""
-        p = self.var_src.get()
-        if p and os.path.exists(p) and not Path(p).name.lower().endswith(".good.json"):
-            return Path(p)
+        """校验用的原始全量文件:返回第一个勾选且存在的原始表(commit 3 改为逐文件)。"""
+        for fn in self.checked_files:
+            p = SOURCE_DIR / fn
+            if p.exists():
+                return p
         if self.verify_origin and os.path.exists(self.verify_origin):
             return Path(self.verify_origin)
         return None
@@ -1336,6 +1374,7 @@ class App:
             self.lbl_hits.config(text="搜索中… 已返回 %d 条" % len(self.hits))
         elif kind == "sres":
             n, fuzzy = payload
+            self.hits = merge_hits(dedupe_hits(self.hits))
             self.hits = self._ordered_hits()   # 同书组相邻,组内按完整度/相关度
             self._fill_results()
             self.lbl_progress.config(text="完成")

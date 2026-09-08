@@ -164,7 +164,6 @@ class App:
         self._press = None         # 左键按下信息
         self._last_click = None    # 上次单击信息,用于双击判定
         self._panel = None         # 书源文件下拉面板(见 _src_panel_*)
-        self._add_dlg = None       # 「+ 新加入书源…」二级面板
 
         self._build_ui()
         self._anchor = None        # Shift 连续选锚点行(资源管理器语义)
@@ -179,9 +178,15 @@ class App:
         top.pack(fill="x", padx=8, pady=6)
 
         # 书源文件 = 已加入清单(见 _src_panel_*):点开下拉面板增删文件
-        self.btn_src = ttk.Button(top, text="书源文件(0) ▼", width=18,
-                                  command=self._src_panel_toggle)
-        self.btn_src.pack(side="left", **pad)
+        # 触发器样式与「书源分组/搜索域」统一:只读 Combobox + 下箭头;
+        # 点击/箭头/方向键一律拦截内置下拉(return "break"),改弹自绘清单面板
+        self.var_src_txt = tk.StringVar(value="书源文件(0)")
+        self.cmb_src = ttk.Combobox(top, textvariable=self.var_src_txt, width=18,
+                                    state="readonly", values=("书源文件",))
+        self.cmb_src.pack(side="left", **pad)
+        for _seq in ("<Button-1>", "<Down>", "<F4>", "<Alt-Down>"):
+            self.cmb_src.bind(_seq, self._src_trigger_press, add="+")
+        self.cmb_src.bind("<Return>", lambda e: self._src_trigger_press(e))
         ttk.Button(top, text="打开目录", command=self._open_src_dir).pack(side="left")
         self.btn_verify = ttk.Button(top, text="✔ 校验书源", command=self.start_verify)
         self.btn_verify.pack(side="left")
@@ -302,17 +307,22 @@ class App:
         self.q.put(("log", s))
 
     # ------------------------------------------- 书源文件下拉面板(清单式) ----
-    # 语义(2026-09-09 拍板):顶部按钮「书源文件(N) ▼」点开面板,面板只列
+    # 语义(2026-09-09 拍板):顶部「书源文件」Combobox 触发器点开面板,面板只列
     # "已加入清单"(checked_files,参与搜索/下载);行尾 ✕ = 仅移出清单(不删
-    # 磁盘文件);底部「+ 新加入书源…」= 从 shuyuan/ 未加入文件勾选,或浏览
-    # 整机多选(复制进 shuyuan/)。清单 = 记忆 sources,重启原样恢复。
+    # 磁盘文件);底部「+ 新加入书源…」= 直接弹系统文件对话框多选(不在
+    # shuyuan/ 的自动复制进去)。清单 = 记忆 sources,重启原样恢复。
+    def _src_trigger_press(self, e):
+        """Combobox 触发器:不弹内置下拉,改开/关自绘清单面板。"""
+        self._src_panel_toggle()
+        return "break"
+
     def _src_files_missing(self, fn):
         return not (SOURCE_DIR / fn).exists()
 
     def _update_src_text(self):
         n = len(self.checked_files)
         try:
-            self.btn_src.config(text="书源文件(%d) ▼" % n)
+            self.var_src_txt.set("书源文件(%d)" % n)
         except Exception:
             pass
 
@@ -332,42 +342,40 @@ class App:
             pass
         wrap = tk.Frame(top, bd=1, relief="solid", bg="#f0f0f0")
         wrap.pack(fill="both", expand=True)
-        frm = ttk.Frame(wrap, padding=8)
+        frm = ttk.Frame(wrap, padding=6)
         frm.pack(fill="both", expand=True)
 
-        ttk.Label(frm, text="书源文件(已加入清单 → 参与搜索/下载)",
-                  font=("Microsoft YaHei UI", 9, "bold")).pack(anchor="w")
         n = len(self.checked_files)
-        ttk.Label(frm, text="共 %d 个文件 · 行尾 ✕ 仅移出清单,不删文件"
-                   % n, foreground="#555").pack(anchor="w", pady=(0, 4))
+        ttk.Label(frm, text="书源文件 · %d" % n,
+                  font=("Microsoft YaHei UI", 9, "bold")).pack(anchor="w", pady=(0, 3))
 
         rows = ttk.Frame(frm)
         rows.pack(fill="both", expand=True)
         if not self.checked_files:
-            ttk.Label(rows, text="(清单为空 — 点下方「+ 新加入书源…」添加)",
-                      foreground="#888").pack(anchor="w", pady=6)
+            ttk.Label(rows, text="(空 — 点下方「+ 新加入书源…」)",
+                      foreground="#888").pack(anchor="w", pady=4)
         for fn in list(self.checked_files):
             row = ttk.Frame(rows)
             row.pack(fill="x", pady=1)
             missing = self._src_files_missing(fn)
-            ttk.Label(row, text=("⚠ %s(缺失)" % fn) if missing else fn,
+            ttk.Label(row, text=("⚠ %s" % fn) if missing else fn,
                       foreground="#b00020" if missing else "").pack(side="left")
             ttk.Button(row, text="✕", width=2,
                        command=lambda f=fn: self._remove_source_file(f)).pack(side="right")
 
-        ttk.Separator(frm, orient="horizontal").pack(fill="x", pady=6)
+        ttk.Separator(frm, orient="horizontal").pack(fill="x", pady=4)
         ttk.Button(frm, text="+ 新加入书源…",
-                   command=self._add_sources_dialog).pack(fill="x")
+                   command=self._add_sources_browse).pack(fill="x")
 
         top.update_idletasks()
-        x = self.btn_src.winfo_rootx()
-        y = self.btn_src.winfo_rooty() + self.btn_src.winfo_height()
-        w = max(self.btn_src.winfo_width(), 340)
+        x = self.cmb_src.winfo_rootx()
+        y = self.cmb_src.winfo_rooty() + self.cmb_src.winfo_height()
+        w = max(self.cmb_src.winfo_width(), 300)
         top.geometry("%dx%d+%d+%d" % (w, top.winfo_reqheight(), x, y))
         top.focus_set()
         top.bind("<Escape>", lambda e: self._src_panel_close())
         self._panel = top
-        # 点击面板外任意处关闭(触发器/主窗本身除外——交给 command 收尾)
+        # 点击面板外任意处关闭(触发器自身除外——由 _src_trigger_press toggle 收尾)
         self._outside_id = self.root.bind_all(
             "<Button-1>", self._src_panel_outside, add="+")
 
@@ -381,7 +389,7 @@ class App:
             return
         if w.startswith(str(p) + "."):               # 面板内部
             return
-        if w in (str(self.btn_src),):                # 触发器自身:由 command toggle
+        if w in (str(self.cmb_src),):                # 触发器自身:由 toggle 收尾
             return
         self._src_panel_close()
 
@@ -415,81 +423,19 @@ class App:
         self._reload_all()
         self._src_panel_refresh()
 
-    # ---------------------------------------------- 新加入书源(二级面板) ----
-    def _scan_new_sources(self):
-        """shuyuan/ 内可加入的原始表(排除已加入清单与校验产物 .good/.error)。"""
-        try:
-            return sorted(f.name for f in SOURCE_DIR.iterdir()
-                          if f.suffix == ".json"
-                          and not f.name.endswith((".good.json", ".error.json")))
-        except Exception:
-            return []
-
-    def _add_sources_dialog(self):
-        """「+ 新加入书源…」:shuyuan/ 未加入文件勾选加入 + 浏览整机多选。"""
-        top = tk.Toplevel(self.root)
-        top.title("新加入书源")
-        top.transient(self.root)
-        try:
-            top.grab_set()
-        except Exception:
-            pass
-        top.geometry("+%d+%d" % (self.root.winfo_rootx() + 140,
-                                 self.root.winfo_rooty() + 140))
-        frm = ttk.Frame(top, padding=10)
-        frm.pack(fill="both", expand=True)
-        ttk.Label(frm, text="勾选要从 shuyuan/ 加入清单的书源文件:",
-                  font=("Microsoft YaHei UI", 9, "bold")).pack(anchor="w", pady=(0, 4))
-        box = ttk.Frame(frm)
-        box.pack(fill="both", expand=True)
-        vars_ = {}
-        cands = [f for f in self._scan_new_sources()
-                 if f not in self.checked_files]
-        if cands:
-            for fn in cands:
-                v = tk.BooleanVar(value=False)
-                vars_[fn] = v
-                ttk.Checkbutton(box, text=fn, variable=v).pack(anchor="w")
-        else:
-            ttk.Label(box, text="(shuyuan/ 内没有未加入的原始书源文件;\n"
-                                "可用下方「浏览整机…」从任意位置添加)",
-                      foreground="#888").pack(anchor="w", pady=6)
-        if self.checked_files:
-            ttk.Label(frm, text="已在清单:%s" % "、".join(self.checked_files),
-                      foreground="#555").pack(anchor="w", pady=(4, 2))
-        ttk.Button(frm, text="浏览整机…(可多选,自动复制进 shuyuan/)",
-                   command=lambda: self._browse_add_sources(top)).pack(anchor="w", pady=6)
-        btns = ttk.Frame(frm)
-        btns.pack(fill="x", pady=(8, 0))
-        ttk.Button(btns, text="取消", command=top.destroy).pack(side="right", padx=(8, 0))
-
-        def _ok():
-            changed = False
-            for fn, v in vars_.items():
-                if v.get() and fn not in self.checked_files:
-                    self.checked_files.append(fn)
-                    changed = True
-            try:
-                top.destroy()
-            except Exception:
-                pass
-            if changed:
-                self._reload_all()
-                self._src_panel_refresh()
-            else:
-                self.log("未勾选任何新文件,清单不变。")
-
-        ttk.Button(btns, text="加入清单", command=_ok).pack(side="right")
-        self._add_dlg = top
-
-    def _browse_add_sources(self, top):
-        """浏览整机多选 JSON → 复制进 shuyuan/ → 加入清单。"""
-        ps = filedialog.askopenfilenames(title="选择书源 JSON 文件(可多选)",
-                                         filetypes=[("JSON", "*.json")],
-                                         initialdir=str(SOURCE_DIR))
+    # -------------------------------------------- 新加入书源(直接文件对话框) --
+    # v1.5.1:去掉二级勾选窗口(transient+grab 模态窗最小化后无法找回 = 死锁
+    # 观感),点「+ 新加入书源…」= 关面板 → 直接弹 Windows 文件对话框多选
+    # (定位 shuyuan/;不在 shuyuan/ 的自动复制进去) → 加入清单并合并重载。
+    def _add_sources_browse(self):
+        self._src_panel_close()
+        ps = filedialog.askopenfilenames(
+            title="新加入书源(可多选;不在 shuyuan/ 的会自动复制进去)",
+            filetypes=[("JSON 书源", "*.json"), ("所有文件", "*.*")],
+            initialdir=str(SOURCE_DIR))
         if not ps:
             return
-        added = []
+        added, copied = [], []
         for p in ps:
             src = Path(p)
             dest = SOURCE_DIR / src.name
@@ -497,21 +443,19 @@ class App:
                 try:
                     import shutil
                     shutil.copy2(str(src), str(dest))
-                    self.log("已复制 %s → shuyuan/" % src.name)
+                    copied.append(src.name)
                 except Exception as e:
                     messagebox.showerror("复制失败", "%s\n%s" % (src, e))
                     continue
             if src.name not in self.checked_files:
                 self.checked_files.append(src.name)
                 added.append(src.name)
-        try:
-            top.destroy()
-        except Exception:
-            pass
-        if added:
-            self.log("已加入清单: %s" % "、".join(added))
-            self._reload_all()
-            self._src_panel_refresh()
+        if not added:
+            self.log("所选文件已在清单中,无新增。")
+            return
+        prefix = ("已复制进 shuyuan/: %s → " % "、".join(copied)) if copied else ""
+        self.log("%s已加入清单: %s" % (prefix, "、".join(added)))
+        self._reload_all()
 
     def _open_src_dir(self):
         SOURCE_DIR.mkdir(parents=True, exist_ok=True)

@@ -133,17 +133,25 @@ class App:
         self.busy_dl = False
         self.busy_verify = False
         self._last_key = ""
-        self.var_fmt = tk.StringVar(value="epub")      # 导出格式:epub / txt(二选一)
-        self.var_mode = tk.StringVar(value="single")   # 下载方式:single / batch
-
-        # —— 多选交互状态(资源管理器式,常开;见 MultiSelect 相关方法)——
+        # —— 运行记忆:先读盘,勾选/取消/选项都持久,重启原样恢复(见 _mem_*)——
         mem = self._mem_load()
         self.verify_origin = mem.get("verify_origin") or ""
         self.verify_done = mem.get("verify_done") or {}
+        self._mem_last = mem       # 记忆缓存(含 selected key 列表)
+
+        # 顶部勾选框 + 下载弹窗选项:默认值 = 上次记忆(取消过的保持取消);
+        # 挂 trace 后任一勾选变化都立即写盘,不会再"回到默认勾上"。
+        self.var_fuzzy = tk.BooleanVar(value=bool(mem.get("fuzzy", True)))
+        self.var_rel = tk.BooleanVar(value=bool(mem.get("rel", True)))
+        self.var_fmt = tk.StringVar(value=mem.get("fmt") or "epub")      # epub / txt
+        self.var_mode = tk.StringVar(value=mem.get("mode") or "single")  # single / batch
+        for _v in (self.var_fuzzy, self.var_rel, self.var_fmt, self.var_mode):
+            _v.trace_add("write", self._mem_save_opts)
+
+        # —— 多选交互状态(资源管理器式,常开;见 MultiSelect 相关方法)——
         self._drag = None          # 进行中的橡皮筋状态 dict 或 None
         self._press = None         # 左键按下信息
         self._last_click = None    # 上次单击信息,用于双击判定
-        self._mem_last = mem       # 记忆缓存(含 selected key 列表)
 
         self._build_ui()
         self._anchor = None        # Shift 连续选锚点行(资源管理器语义)
@@ -181,10 +189,8 @@ class App:
         self.ent_key.bind("<Return>", lambda ev: self.start_search())
         self.btn_search = ttk.Button(row2, text="🔍 搜索", command=self.start_search)
         self.btn_search.pack(side="left")
-        self.var_fuzzy = tk.BooleanVar(value=True)
         cb = ttk.Checkbutton(row2, text="模糊搜索", variable=self.var_fuzzy)
         cb.pack(side="left", padx=(8, 0))
-        self.var_rel = tk.BooleanVar(value=True)
         ttk.Checkbutton(row2, text="只看相关结果", variable=self.var_rel).pack(side="left", padx=(8, 0))
         self.btn_stop = ttk.Button(row2, text="停止", command=self.stop_all, state="disabled")
         self.btn_stop.pack(side="left", **pad)
@@ -621,46 +627,85 @@ class App:
                    for k in (d.get("selected") or [])]
             return {"multi": True, "selected": sel,
                     "verify_origin": d.get("verify_origin") or "",
-                    "verify_done": d.get("verify_done") or {}}
+                    "verify_done": d.get("verify_done") or {},
+                    "fuzzy": bool(d.get("fuzzy", True)),
+                    "rel": bool(d.get("rel", True)),
+                    "fmt": d.get("fmt") or "epub",
+                    "mode": d.get("mode") or "single"}
         except Exception:
-            # 无记忆/文件损坏:空选中。多选交互常开(单击仍是单选,无害)。
+            # 无记忆/文件损坏:空选中 + 出厂默认选项。多选交互常开(单击仍是单选,无害)。
             return {"multi": True, "selected": [], "verify_origin": "",
-                    "verify_done": {}}
+                    "verify_done": {}, "fuzzy": True, "rel": True,
+                    "fmt": "epub", "mode": "single"}
 
     def _mem_save(self, keys=None):
+        """选中变化后的落盘入口(keys=None 时取当前树选中)。"""
+        self._mem_flush(keys)
+
+    def _mem_save_origin(self):
+        """书源校验记录变化后的落盘入口;只用缓存选中,避免启动早期空树清空记忆。"""
+        if self._mem_last:
+            keys = list(self._mem_last.get("selected") or [])
+        else:
+            keys = self._current_keys()
+        self._mem_flush(keys)
+
+    def _mem_save_opts(self, *a):
+        """选项勾选变化入口(顶部两勾选框 / 下载方式 / 导出格式):即改即存。"""
+        if self._mem_last:
+            keys = list(self._mem_last.get("selected") or [])
+        else:
+            keys = self._current_keys()
+        self._mem_flush(keys)
+
+    def _mem_flush(self, keys=None):
+        """统一全量写盘:选中 + 校验记录 + 选项勾选一次写齐,互不覆盖。
+
+        keys=None 时读当前树选中;非 None(启动早期树未填充等)用给定 keys。
+        """
         try:
             if keys is None:
                 keys = self._current_keys()
-            data = {"multi": True, "selected": [[s, u] for s, u in keys],
+            data = {"multi": True,
+                    "selected": [[s, u] for s, u in keys],
                     "verify_origin": getattr(self, "verify_origin", ""),
-                    "verify_done": getattr(self, "verify_done", {})}
+                    "verify_done": getattr(self, "verify_done", {}),
+                    "fuzzy": bool(self.var_fuzzy.get()),
+                    "rel": bool(self.var_rel.get()),
+                    "fmt": self.var_fmt.get() or "epub",
+                    "mode": self.var_mode.get() or "single"}
             with open(STATE_FILE, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False)
-            self._mem_last = {"multi": True, "selected": list(keys)}
-        except Exception:
-            pass
-
-    def _mem_save_origin(self):
-        """只更新 verify_origin/verify_done 字段;不动选中记忆(启动早期树还未填充)。"""
-        try:
-            sel = self._mem_last.get("selected") or [] if self._mem_last else []
-            data = {"multi": True, "selected": [[s, u] for s, u in sel],
-                    "verify_origin": self.verify_origin,
-                    "verify_done": self.verify_done}
-            with open(STATE_FILE, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False)
+            self._mem_last = {"multi": True,
+                              "selected": list(keys),
+                              "verify_origin": data["verify_origin"],
+                              "verify_done": data["verify_done"],
+                              "fuzzy": data["fuzzy"],
+                              "rel": data["rel"],
+                              "fmt": data["fmt"],
+                              "mode": data["mode"]}
         except Exception:
             pass
 
     def _mem_clear(self):
-        """清除记忆入口:删状态文件 + 清空当前选中。"""
+        """清除记忆入口:选中与勾选项(顶部/下载弹窗)一起恢复出厂并落盘。"""
         try:
             STATE_FILE.unlink()
         except Exception:
             pass
-        self._mem_last = {"multi": True, "selected": []}
+        self._mem_last = {"multi": True, "selected": [],
+                          "verify_origin": self.verify_origin,
+                          "verify_done": self.verify_done,
+                          "fuzzy": True, "rel": True,
+                          "fmt": "epub", "mode": "single"}
+        for _v, _d in ((self.var_fuzzy, True), (self.var_rel, True),
+                       (self.var_fmt, "epub"), (self.var_mode, "single")):
+            try:
+                _v.set(_d)         # 触发 trace → _mem_save_opts → 落盘全新状态
+            except Exception:
+                pass
         self._apply_selection([], notify=False)
-        messagebox.showinfo("清除记忆", "已清除保存的选中状态。")
+        messagebox.showinfo("清除记忆", "已清除保存的选中与选项状态(恢复默认)。")
 
     def _try_restore_selection(self):
         """搜索结果就绪后,按记忆恢复选中(容错:已不存在的条目自动跳过)。"""

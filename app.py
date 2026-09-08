@@ -122,6 +122,7 @@ class App:
 
         self.q = queue.Queue()
         self.hits = []
+        self._gtag = {}                # 同书分组 → 底色交替序号(见 _insert_hit_row)
         self.sources = []              # 工作书源(搜索/下载用;校验后 = good 表内容)
         self.verify_origin = ""        # 原始全量书源文件路径(校验专用,重启不丢)
         self.verify_done = {}          # {"origin": 路径, "time": 完成时刻}
@@ -214,6 +215,9 @@ class App:
         vs.pack(side="right", fill="y")
         self.tree.bind("<<TreeviewSelect>>", lambda ev: self._sync_sel_label())  # 键盘增选时同步计数
         self.tree.tag_configure("blocked", foreground="#b00020")   # 被封/失败的源标红
+        # 同书分组底色:相邻组交替,一眼看出哪些行是同一本书
+        self.tree.tag_configure("grp1", background="#eef4fb")
+        self.tree.tag_configure("grp2", background="#ffffff")
         # 移除 Treeview 类级绑定(其内置"单击替换选择/拖拽行选"会与自定义交互冲突),
         # 滚轮与方向键等必要行为由下方自行接管。
         try:
@@ -492,6 +496,7 @@ class App:
         self.stop_search.clear()
         self._set_busy(True)
         self.hits = []
+        self._gtag = {}              # 同书分组 → 底色交替序号(见 _insert_hit_row)
         for it in self.tree.get_children():
             self.tree.delete(it)
         self.idx2iid = {}
@@ -585,6 +590,53 @@ class App:
     def _hit_key(self, h):
         """条目的稳定 ID:(书源名, 详情URL)。用于记忆恢复与去重。"""
         return (h["source"].get("bookSourceName", "?"), h["book_url"])
+
+    # --------------------------------------------- 同书分组展示/排序 ---------
+    def _row_name(self, h):
+        """书名列文本:组首行且同书命中多源时加"【N源】"前缀。"""
+        if h.get("_group_first") and h.get("_src_count", 1) > 1:
+            return "【%d源】%s" % (h["_src_count"], h["name"])
+        return h["name"]
+
+    def _insert_hit_row(self):
+        """把 self.hits 末行插入表格(增量上屏与整体重建共用):
+        同组行交替底色,组首行加【N源】前缀;tags[0] 恒为 hits 下标。"""
+        i = len(self.hits) - 1
+        h = self.hits[i]
+        k = h.get("_group_key") or ("?", self._hit_key(h))
+        seq = self._gtag.setdefault(k, len(self._gtag))
+        tag = "grp1" if seq % 2 == 0 else "grp2"
+        iid = self.tree.insert("", "end",
+                               values=(self._row_name(h), h.get("author", ""),
+                                       h.get("kind", ""),
+                                       h.get("last_chapter", ""),
+                                       h["source"]["bookSourceName"]),
+                               tags=(str(i), tag))
+        self.idx2iid[i] = iid
+
+    @staticmethod
+    def _completeness(h):
+        """字段完整度:作者齐(+2)>分类/最新章节(+1)。组内排序用,
+        完整度高的源排前,默认下载选中的质量更高。"""
+        return ((2 if h.get("author") else 0) + (1 if h.get("kind") else 0)
+                + (1 if h.get("last_chapter") else 0))
+
+    def _ordered_hits(self):
+        """重排 self.hits:同书组相邻;组间按组内最高相关度(相关度并列时
+        保持先到先排);组内按字段完整度+相关度排前。"""
+        groups, order = {}, []
+        for h in self.hits:
+            k = h.get("_group_key") or ("?", self._hit_key(h))
+            if k not in groups:
+                groups[k] = []
+                order.append(k)
+            groups[k].append(h)
+        for g in groups.values():
+            g.sort(key=lambda x: (self._completeness(x), self._score_hit(x)),
+                   reverse=True)
+        order.sort(key=lambda k: max(self._score_hit(x) for x in groups[k]),
+                   reverse=True)
+        return [x for k in order for x in groups[k]]
 
     def _current_keys(self):
         """当前选中行的稳定 ID 列表(按行序)。"""
@@ -1085,6 +1137,17 @@ class App:
         "下载单一"模式能尽快换下一个候选,不会长时间停在探测上。
         """
         srcname = h["source"].get("bookSourceName", "?")
+        # P1 元数据补全:详情页按语义标签抽取,比搜索列表干净;失败回退搜索值。
+        # 只影响导出文件的书名/作者/分类/最新章节,不影响该行选中(键=源+URL)。
+        try:
+            info = engine.fetch_book_info(h["source"], h["book_url"], timeout=6)
+        except Exception:
+            info = {}
+        if info:
+            for k in ("name", "author", "kind", "last_chapter"):
+                if info.get(k):
+                    h[k] = info[k]
+            self.log("↻ 元数据已按详情页修正: [%s]《%s》" % (srcname, h["name"]))
         toc = engine.fetch_toc(h["source"], h["book_url"], stop=self.stop_dl,
                                timeout=6, deadline=time.time() + 15)
         if not toc:
@@ -1178,23 +1241,16 @@ class App:
             if self.var_rel.get() and not self._relevant(h):
                 return                                    # 无关结果不上屏
             self.hits.append(h)
-            i = len(self.hits) - 1
-            iid = self.tree.insert("", "end",
-                                   values=(h["name"], h["author"], h["kind"],
-                                           h.get("last_chapter", ""),
-                                           h["source"]["bookSourceName"]),
-                                   tags=(str(i),))
-            self.idx2iid[i] = iid
+            self._insert_hit_row()
             self.lbl_hits.config(text="搜索中… 已返回 %d 条" % len(self.hits))
         elif kind == "sres":
             n, fuzzy = payload
-            if fuzzy:
-                self.hits.sort(key=self._score_hit, reverse=True)
+            self.hits = self._ordered_hits()   # 同书组相邻,组内按完整度/相关度
             self._fill_results()
             self.lbl_progress.config(text="完成")
             self.lbl_hits.config(text="共找到 %d 条结果" % len(self.hits))
-            self.log("搜索完成,共 %d 条%s" % (len(self.hits),
-                    " · 按相关度排序" if fuzzy else ""))
+            self.log("搜索完成,共 %d 条(同书已分组相邻)%s" % (len(self.hits),
+                    " · 组间按相关度排序" if fuzzy else ""))
             try:                     # 恢复选中即使出错,也必须解开搜索按钮
                 self._try_restore_selection()
             finally:
@@ -1299,12 +1355,9 @@ class App:
         for it in self.tree.get_children():
             self.tree.delete(it)
         self.idx2iid = {}
-        for i, h in enumerate(self.hits):
-            iid = self.tree.insert("", "end", values=(h["name"], h["author"], h["kind"],
-                                                      h.get("last_chapter", ""),
-                                                      h["source"]["bookSourceName"]),
-                                   tags=(str(i),))
-            self.idx2iid[i] = iid
+        self._gtag = {}
+        for _h in self.hits:
+            self._insert_hit_row()
         self._sync_sel_label()
         self.lbl_hits.config(text="共找到 %d 条结果" % len(self.hits))
 

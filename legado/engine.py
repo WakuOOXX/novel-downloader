@@ -88,9 +88,12 @@ def search_sources(sources, key, on_progress=None, stop=None, workers=24,
                    on_hit=None, fuzzy=False):
     """并发搜索。
 
-    - 返回候选列表(URL 去重后)。每个候选为 dict(source/name/author/book_url/...)。
+    - 返回候选列表(同源同URL去重 + 跨源同书合并后)。每个候选为
+      dict(source/name/author/book_url/...),并注记 _group_key/_src_count/
+      _group_first(同书分组信息,同组行在返回列表中相邻)。
     - on_progress(done, total, msg):每完成一个源回调一次(整批源只预筛一次)。
-    - on_hit(hit):每命中一条即时回调(供 GUI 增量上屏)。
+    - on_hit(hit):每轮搜索结束后按合并结果整批回调(供 GUI 增量上屏,
+      回调条目同样带同书分组注记)。
     - fuzzy=True:直搜 0 命中时,自动用 make_key_variants 生成的变体,仅对
       "本轮网络存活的源"重试,直到有命中或变体耗尽。
     """
@@ -176,6 +179,19 @@ def search_sources(sources, key, on_progress=None, stop=None, workers=24,
 
     alive = list(usable)
     all_hits, alive = run_round(alive, key, "")
+
+    def emit(hits):
+        """按轮合并后整批回调(供 GUI 增量上屏):同书行带 _group_key/_src_count,
+        GUI 才能做到"同书相邻 + N源标记"而不用等搜索全部结束。"""
+        if not on_hit or not hits:
+            return
+        for h in merge_hits(dedupe_hits(hits)):
+            try:
+                on_hit(h)
+            except Exception:
+                pass
+
+    emit(all_hits)
     # 模糊兜底:直搜无果 → 变体重试(仅对本轮存活源,每变体至多一轮)
     if fuzzy and not all_hits and alive and not stop.is_set():
         for v in make_key_variants(key):
@@ -190,15 +206,62 @@ def search_sources(sources, key, on_progress=None, stop=None, workers=24,
             all_hits = vhits
             if all_hits:
                 break
-    # 去重(同源同 URL)
-    uniq, seen = [], set()
-    for h in all_hits:
-        k = (h["source"]["bookSourceName"], h["book_url"])
-        if k in seen:
-            continue
-        seen.add(k)
-        uniq.append(h)
-    return uniq
+    # 去重(同源同 URL) + 跨源同书合并(注记 _group_key/_src_count/_group_first)
+    return merge_hits(dedupe_hits(all_hits))
+
+
+def fetch_book_info(source, book_url, timeout=None):
+    """按 ruleBookInfo 抓书籍详情页,返回清洗后的元数据 dict(name/author/
+    kind/last_chapter/intro,仅含非空项);失败或规则含 JS 时返回 {}。
+
+    用途(P1 元数据补全):搜索列表的字段清洗只能"救"错列文本,
+    详情页按语义标签抽取的值更干净,下载前用它覆盖搜索列表脏值。
+    """
+    rbi = source.get("ruleBookInfo") or {}
+    if not isinstance(rbi, dict) or not rbi:
+        return {}
+    if rules.uses_js_text(json.dumps(rbi, ensure_ascii=False)):
+        return {}
+    try:
+        req = rules.parse_request(book_url, {})
+        headers = rules.parse_header(source.get("header"))
+        if req.get("headers"):
+            headers = dict(headers or {})
+            headers.update(req["headers"])
+        url, text = fetch(source.get("bookSourceName", "?"), req["url"],
+                          req["method"], req.get("body", ""), headers,
+                          timeout if timeout else _clamp_timeout(source))
+        if not text:
+            return {}
+        dom = rules.parse_dom(text)
+        out = {}
+        for field, key in (("name", "name"), ("author", "author"),
+                           ("kind", "kind"), ("lastChapter", "last_chapter"),
+                           ("intro", "intro")):
+            rule = rbi.get(field)
+            if not rule:
+                continue
+            try:
+                raw = (rules.extract_value(dom, rule) or "").strip()
+            except Exception:
+                raw = ""
+            if not raw:
+                continue
+            if key == "name":
+                v = clean_name(raw)
+            elif key == "author":
+                v = clean_author(out.get("name", ""), raw)
+            elif key == "kind":
+                v = clean_kind(out.get("name", ""), raw)
+            elif key == "last_chapter":
+                v = clean_last_chapter(out.get("name", ""), raw)
+            else:
+                v = raw
+            if v:
+                out[key] = v
+        return out
+    except Exception:
+        return {}
 
 
 def _resolve_toc_url(source, book_url, timeout=None):

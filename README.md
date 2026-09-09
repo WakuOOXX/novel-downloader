@@ -2,8 +2,6 @@
 
 # 📚 小说下载器
 
-输入书名，聚合搜索 3393 个书源，框选批量下载，导出 EPUB 或 TXT。
-
 Windows 桌面应用 · Python + tkinter · 自研 Legado 规则引擎
 
 [![release](https://img.shields.io/github/v/release/WakuOOXX/novel-downloader)](https://github.com/WakuOOXX/novel-downloader/releases/latest)

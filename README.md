@@ -34,7 +34,7 @@ Windows 桌面应用 · Python + tkinter · 自研 Legado 规则引擎
 
 搜索阶段：
 
-- 一次搜索并发打向 3393 个书源（分组可选，共 252 个取值），结果边搜边上屏，不用等全部跑完。
+- 一次搜索并发，结果边搜边上屏，不用等全部跑完。
 - 直搜无果时自动生成关键词变体重试，只打这一轮还活着的源，结果按相关度排序。
 - 依赖 JS 或登录态的书源自动跳过，不会报错中断。
 
@@ -64,8 +64,6 @@ Windows 桌面应用 · Python + tkinter · 自研 Legado 规则引擎
 ![下载方式弹窗](docs/assets/screenshot-download-dialog.png)
 
 -->
-
-实测记录：搜索「斗破苍穹」命中 18 条（含天蚕土豆同名书），目录 1625 章完整抓取并导出成功。交互演示见[项目官网](https://WakuOOXX.github.io/novel-downloader/)。
 
 ## 🚀 快速开始
 

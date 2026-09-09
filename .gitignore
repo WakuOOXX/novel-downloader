@@ -27,3 +27,9 @@ venv/
 *.db
 *.sqlite3
 test_outputs/
+
+# 仓库瘦身(2026-09-10):过程文档/单测/本机工具移出仓库,本地保留
+_local/
+tests/
+verify_sources.py
+启动下载器.bat

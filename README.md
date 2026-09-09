@@ -83,7 +83,7 @@ exe 免 Python 环境，已在 Windows 11 实测。书源包可单独替换，�
 git clone https://github.com/WakuOOXX/novel-downloader.git
 cd novel-downloader
 pip install requests beautifulsoup4 lxml
-python app.py        # 或双击 启动下载器.bat（pythonw 启动，无控制台窗口）
+python app.py        # 用 pythonw app.py 启动可免控制台窗口
 ```
 
 注意：解释器必须带 tkinter，python.org 官方安装包默认包含；部分精简版 Python 没有，启动会报 `ModuleNotFoundError`。排查细节见[技术文档 §2](docs/技术文档.md)。

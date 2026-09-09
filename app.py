@@ -413,12 +413,26 @@ class App:
         else:
             self._update_src_text()
 
+    def _cleanup_verify_artifacts(self, fn, origin):
+        """删除指定书源文件的校验产物(.good.json / .error.json)并清除验证记录。"""
+        for suffix in (".good.json", ".error.json"):
+            p = SOURCE_DIR / fn if isinstance(origin, str) else origin
+            target = p.with_name(p.stem + suffix)
+            if target.exists():
+                try:
+                    target.unlink()
+                    self.log("已清理: %s" % target.name)
+                except Exception as e:
+                    self.log("⚠ 清理 %s 失败: %s" % (target.name, e))
+        self.verify_dones.pop(fn, None)
+
     def _remove_source_file(self, fn):
         """行尾 ✕:仅移出清单(磁盘文件保留,可经「新加入」再加回)。"""
         try:
             self.checked_files.remove(fn)
         except ValueError:
             return
+        self._cleanup_verify_artifacts(fn, SOURCE_DIR / fn)
         self.log("已移出书源清单(文件保留在 shuyuan/): %s" % fn)
         self._reload_all()
         self._src_panel_refresh()
@@ -488,6 +502,7 @@ class App:
         for fn in self.checked_files:
             p = SOURCE_DIR / fn
             if not p.exists():
+                self._cleanup_verify_artifacts(fn, p)
                 self.log("⚠ 书源文件缺失,已跳过(勾选保留): %s" % fn)
                 continue
             try:
@@ -519,6 +534,10 @@ class App:
                 s["_file"] = fn                     # 运行时归属标记,不写回书源 JSON
                 s["_from_good"] = use_good          # 供跨文件去重"good 优先"
             merged.extend(use)
+        # 清理孤立的 verify_dones 记录(已不在清单中的文件)
+        stale = [k for k in self.verify_dones if k not in self.checked_files]
+        for k in stale:
+            self._cleanup_verify_artifacts(k, SOURCE_DIR / k)
         # 🆕 跨文件合并重复书源:按 (书源名, 站点URL) 去重,good 表来源优先
         self.sources, n_dup = dedupe_sources(merged)
         if self.checked_files and self.sources:
@@ -628,7 +647,8 @@ class App:
                 aborted = True
                 break
             if n_ok == 0:
-                self.q.put(("log", "⚠ 文件 %s 全部 %d 个源失效(耗时 %.0fs),未生成表。"
+                self._cleanup_verify_artifacts(fn, origin)
+                self.q.put(("log", "⚠ 文件 %s 全部 %d 个源失效(耗时 %.0fs),已清理旧有效表。"
                                     % (fn, n_bad, elapsed)))
                 continue
             seen, good = set(), []

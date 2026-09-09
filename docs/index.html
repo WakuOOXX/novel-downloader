@@ -183,9 +183,9 @@
 <header class="hero" id="top">
   <div class="hero-bg"></div>
   <div class="wrap">
-    <span class="eyebrow"><span class="dot-pulse"></span>v1.5 已发布 · 源码已同步 · Windows 免安装</span>
+    <span class="eyebrow"><span class="dot-pulse"></span>v1.5.2 已发布 · Windows 免安装 · 发布包不含书源</span>
     <h1>全网小说,一次搜索<br><span class="g">下载整本,导出即读</span></h1>
-    <p class="sub">把书名输入进去,剩下交给程序:3000+ 书源并发搜索、失效的自动跳过、搜不到就换词重试;单击选一本,框选/Ctrl/Shift 批量选,导出 EPUB 或 TXT。</p>
+    <p class="sub">导入书源 JSON,把书名输入进去,剩下交给程序:3000+ 书源并发搜索、失效的自动跳过、搜不到就换词重试;单击选一本,框选/Ctrl/Shift 批量选,导出 EPUB 或 TXT。</p>
     <div class="hero-cta">
       <a class="btn btn-p" href="https://github.com/WakuOOXX/novel-downloader/releases/latest">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
@@ -238,7 +238,7 @@
     </div>
 
     <div class="stats">
-      <div class="stat"><b>3000+</b><span>内置书源</span></div>
+      <div class="stat"><b>3000+</b><span>支持书源(Legado 格式)</span></div>
       <div class="stat"><b>40</b><span>并发搜索</span></div>
       <div class="stat"><b>1625</b><span>单本实测章节</span></div>
       <div class="stat"><b>2</b><span>EPUB / TXT 二选一</span></div>
@@ -295,21 +295,21 @@
 <section id="start">
   <div class="wrap">
     <div class="sec-head">
-      <h2>三步开始</h2>
-      <p>不用装 Python。解压、搜书名、双击结果,完事。</p>
+      <h2>首次使用三步</h2>
+      <p>不用装 Python。下载解压 → 导入书源 → 搜索下载,完事。</p>
     </div>
     <div class="steps">
       <div class="step">
-        <h3>解压到任意目录</h3>
-        <p>下载 zip 解压。保持 <code>小说下载器.exe</code> 和 <code>bookSource.json</code> 在同一文件夹。</p>
+        <h3>下载解压</h3>
+        <p>下载 zip 解压到任意目录。双击 <code>小说下载器.exe</code> 启动,首次打开会提示你导入书源。</p>
       </div>
       <div class="step">
-        <h3>搜书名</h3>
-        <p>双击打开,输入书名点搜索。想更快,顶部只选「校验可用 / 笔趣阁0905」等当天校验过的分组。</p>
+        <h3>导入书源</h3>
+        <p>准备一份书源 JSON 文件(Legado 生态源 / 自备 / 校验通过版均可),点「书源文件 → + 新加入书源…」导入,支持多选,文件自动复制进 shuyuan/ 目录。</p>
       </div>
       <div class="step">
-        <h3>双击结果,收文件</h3>
-        <p>进度条跑完自动打开输出目录。选好的 <code>EPUB</code>(或 <code>TXT</code>)就躺在里面。</p>
+        <h3>搜索下载</h3>
+        <p>输入书名点搜索,双击结果下载。可点「校验书源」筛选活源,之后搜索更快。</p>
       </div>
     </div>
   </div>
@@ -339,6 +339,10 @@
         <p>不用。书源都在 <code>bookSource.json</code> 里,拿到新版文件覆盖同名文件即可,exe 不用动。</p>
       </details>
       <details>
+        <summary>为什么不内置书源?</summary>
+        <p>两个原因:① 合规 — 书源来自社区共享,内容不可控,内置有法律风险;② 实用 — 书源站变化快,不内置意味着拿到新书源文件直接覆盖即可,不用重新下载整个程序。</p>
+      </details>
+      <details>
         <summary>这是爬虫吗?有没有风险?</summary>
         <p>它只是把你手输的书名发给书源站自己的搜索页,再按公开规则读回正文。请只下载你有权阅读的内容,勿用于侵权用途,详见下方声明。</p>
       </details>
@@ -350,13 +354,13 @@
   <div class="wrap">
     <div class="cta-card">
       <h2>打开就能用,不折腾</h2>
-      <p>Windows 10 / 11 免安装运行,下载即用</p>
+      <p>Windows 10 / 11 免安装运行,发布包不含书源,导入即用</p>
       <div class="hero-cta" style="margin-top:0">
         <a class="btn btn-w" href="https://github.com/WakuOOXX/novel-downloader/releases/latest">⬇ 下载 Windows 版 (zip · 源码已到 v1.5)</a>
         <a class="btn btn-o" href="https://github.com/WakuOOXX/novel-downloader" target="_blank" rel="noopener">GitHub 仓库 ↗</a>
       </div>
     </div>
-    <div class="warn"><b>免责声明</b>　本项目用于学习与研究网络请求与规则解析技术。内置书源清单来自网络公开共享,不保证可用性,也不对其内容负责。请尊重版权:仅供个人试读,下载内容请于 24 小时内删除;长期阅读请支持起点、晋江等正版平台。</div>
+    <div class="warn"><b>免责声明</b>　本项目用于学习与研究网络请求与规则解析技术。发布包不含书源,书源由用户自行准备并导入,不保证可用性,也不对其内容负责。请尊重版权:仅供个人试读,下载内容请于 24 小时内删除;长期阅读请支持起点、晋江等正版平台。</div>
   </div>
 </section>
 

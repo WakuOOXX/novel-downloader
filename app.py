@@ -466,6 +466,11 @@ class App:
     # (定位 shuyuan/;不在 shuyuan/ 的自动复制进去) → 加入清单并合并重载。
     def _add_sources_browse(self):
         self._src_panel_close()
+        try:
+            SOURCE_DIR.mkdir(parents=True, exist_ok=True)   # 全新安装时目录尚不存在
+        except Exception as e:
+            messagebox.showerror("目录错误", str(e))
+            return
         ps = filedialog.askopenfilenames(
             title="新加入书源(可多选;不在 shuyuan/ 的会自动复制进去;"
                   "*.good.json / *.error.json 属校验缓存会被忽略)",

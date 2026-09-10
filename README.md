@@ -71,11 +71,11 @@ Windows 桌面应用 · Python + tkinter · 自研 Legado 规则引擎
 
 ### 方式一：免安装版（推荐）
 
-1. 下载 [novel-downloader-v1.1.0-windows-x64.zip](https://github.com/WakuOOXX/novel-downloader/releases/latest/download/novel-downloader-v1.1.0-windows-x64.zip) 并解压；
-2. 保持 `小说下载器.exe` 与 `bookSource.json` 在同一文件夹；
-3. 双击 exe，输入书名开始搜索。
+1. 下载 [最新版 release](https://github.com/WakuOOXX/novel-downloader/releases/latest) 里的 `novel-downloader-vX.Y.Z-windows-x64.zip`，解压到任意目录；
+2. 双击 `小说下载器.exe`（免 Python 环境）；
+3. 首次使用：点顶部「打开目录」→ 程序会自动创建并打开 `shuyuan\` 文件夹，把 Legado 书源 JSON 放进去 → 回到程序用「+ 新加入书源…」加入清单。
 
-exe 免 Python 环境，已在 Windows 11 实测。书源包可单独替换，不用重新下载程序。首次启动需要解压，慢一两秒属正常。
+exe 免 Python 环境，已在 Windows 11 实测。**发布包不含书源**（版权原因），需自备；书源可随时替换，不用重下程序。首次启动需解压，慢一两秒属正常。
 
 ### 方式二：源码运行
 
@@ -149,7 +149,7 @@ python app.py        # 用 pythonw app.py 启动可免控制台窗口
 | `downloads/` | 下载输出目录，可在界面里改 |
 | `docs/` | 项目官网源码（GitHub Pages） |
 
-书源勾选、分组、关键词、搜索域、输出目录都会在程序内记住，不用每次重设。
+书源勾选清单、搜索域、模糊搜索/只看相关结果勾选、导出格式、下载方式会记在程序内，重启原样恢复；分组、关键词、输出目录每次启动回默认。（「清除缓存」会把这些重置回默认，但保留书源勾选清单。）
 
 ## ❓ 常见问题
 
@@ -185,7 +185,7 @@ pyinstaller --noconfirm --clean --onefile --windowed --name 小说下载器 app.
 
 ## ⚠️ 免责声明
 
-本项目仅用于学习与研究网络请求与规则解析技术。内置书源清单来自网络公开共享，不保证可用性，也不对任何源的内容负责。请尊重作品版权：仅供个人试读，下载内容请于 24 小时内删除；长期阅读请支持正版（起点、晋江等官方平台）。
+本项目仅用于学习与研究网络请求与规则解析技术。程序**不内置任何书源**，书源由使用者自行准备（通常来自网络公开共享），不保证可用性，也不对任何源的内容负责。请尊重作品版权：仅供个人试读，下载内容请于 24 小时内删除；长期阅读请支持正版（起点、晋江等官方平台）。
 
 ## 📄 License
 

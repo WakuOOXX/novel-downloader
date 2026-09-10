@@ -49,6 +49,29 @@ def good_table_path(origin: Path) -> Path:
     return origin.with_name(origin.stem + ".good.json")
 
 
+VERIFY_ARTIFACT_SUFFIXES = (".good.json", ".error.json")   # 校验产物后缀 = 可再生缓存
+
+
+def is_verify_artifact(name) -> bool:
+    """校验产物判定:*.good.json / *.error.json。
+
+    它们是「校验书源」跑出来的缓存(有效表/失效表),可由原始表重新生成,
+    既不能当书源输入(否则"产物再校验"形成滚雪球),也不属于用户配置。
+    """
+    return str(name).lower().endswith(VERIFY_ARTIFACT_SUFFIXES)
+
+
+def scan_verify_artifacts():
+    """shuyuan/ 下现存的全部校验产物(含无主的孤儿产物),按文件名排序。"""
+    try:
+        if SOURCE_DIR.exists():
+            return [p for p in sorted(SOURCE_DIR.iterdir())
+                    if p.is_file() and is_verify_artifact(p.name)]
+    except Exception:
+        pass
+    return []
+
+
 class DownloadDialog:
     """下载方式选择弹窗:单一(自动跳过被封书源) / 合并(每本都下) + 导出格式单选。"""
 
@@ -267,7 +290,7 @@ class App:
         self.btn_sel_inv.pack(side="left", padx=4)
         self.btn_sel_none = ttk.Button(selbar, text="清空选择", command=self.sel_none, width=9)
         self.btn_sel_none.pack(side="left")
-        ttk.Button(selbar, text="清除记忆", command=self._mem_clear, width=9).pack(side="left", padx=4)
+        ttk.Button(selbar, text="清除缓存", command=self._cache_clear, width=9).pack(side="left", padx=4)
         self.lbl_sel = ttk.Label(selbar, text="已选 0 本", foreground="#0066cc")
         self.lbl_sel.pack(side="left", padx=12)
         self.lbl_sel_hint = ttk.Label(
@@ -444,14 +467,18 @@ class App:
     def _add_sources_browse(self):
         self._src_panel_close()
         ps = filedialog.askopenfilenames(
-            title="新加入书源(可多选;不在 shuyuan/ 的会自动复制进去)",
+            title="新加入书源(可多选;不在 shuyuan/ 的会自动复制进去;"
+                  "*.good.json / *.error.json 属校验缓存会被忽略)",
             filetypes=[("JSON 书源", "*.json"), ("所有文件", "*.*")],
             initialdir=str(SOURCE_DIR))
         if not ps:
             return
-        added, copied = [], []
+        added, copied, skipped = [], [], []
         for p in ps:
             src = Path(p)
+            if is_verify_artifact(src.name):    # 校验产物=缓存,不能当书源输入
+                skipped.append(src.name)
+                continue
             dest = SOURCE_DIR / src.name
             if src.resolve() != dest.resolve():
                 try:
@@ -464,8 +491,18 @@ class App:
             if src.name not in self.checked_files:
                 self.checked_files.append(src.name)
                 added.append(src.name)
+        if skipped:
+            self.log("⚠ 已忽略校验产物(校验生成的缓存,非书源): %s"
+                     % "、".join(skipped))
         if not added:
-            self.log("所选文件已在清单中,无新增。")
+            if skipped and not copied:
+                messagebox.showinfo(
+                    "已忽略",
+                    "所选的都是校验产物(*.good.json / *.error.json),\n"
+                    "它们是「校验书源」生成的缓存,不能作为书源加入。\n"
+                    "若想清掉它们,请点「清除缓存」。")
+            else:
+                self.log("所选文件已在清单中,无新增。")
             return
         prefix = ("已复制进 shuyuan/: %s → " % "、".join(copied)) if copied else ""
         self.log("%s已加入清单: %s" % (prefix, "、".join(added)))
@@ -498,6 +535,18 @@ class App:
         且其 .good.json 存在 → 搜索/下载用 good 表;否则该文件用全量表
         (外部/旧表不自动采用)。缺失/读取失败的文件保留勾选,跳过并日志提示。
         """
+        # 自愈:清单里若混入校验产物(*.good.json/*.error.json)一律剔除,并清掉它们
+        # 的孤立校验记录 —— 产物是缓存,当书源输入会形成"产物→再校验→再产物"滚雪球。
+        bad = [fn for fn in self.checked_files if is_verify_artifact(fn)]
+        if bad:
+            for fn in bad:
+                try:
+                    self.checked_files.remove(fn)
+                except ValueError:
+                    pass
+                self.verify_dones.pop(fn, None)
+            self.log("⚠ 已从清单剔除校验产物(校验生成的缓存,非书源): %s"
+                     % "、".join(bad))
         merged, n_good = [], 0
         for fn in self.checked_files:
             p = SOURCE_DIR / fn
@@ -984,23 +1033,60 @@ class App:
         except Exception:
             pass
 
-    def _mem_clear(self):
-        """清除记忆入口:选中与勾选项(顶部/下载弹窗)一起恢复出厂并落盘。
+    def _cache_clear(self):
+        """清除缓存入口:清掉可再生缓存,保留用户配置。
 
-        书源勾选回到默认单文件(bookSource.json),校验记录一并清除;
-        verify_origin/verify_done 为旧字段,只保留缓存不再写入新语义。
+        清理对象(全部可再生):
+          ① shuyuan/ 下全部校验产物(*.good.json / *.error.json);
+          ② 校验记录(verify_dones + 旧字段 verify_origin/verify_done);
+          ③ 选项打勾(fuzzy/rel/fmt/mode/domain)→ 恢复出厂默认;
+          ④ 上次选中的书目(selected)。
+        保留:书源勾选清单(checked_files)。它是用户配置而非缓存 ——
+        旧「清除记忆」会把它压回默认单文件,导致"可用源突然只剩一个"。
         """
-        try:
-            STATE_FILE.unlink()
-        except Exception:
-            pass
-        self.checked_files = [DEFAULT_SOURCE.name]
+        arts = scan_verify_artifacts()
+        total = 0
+        for _p in arts:
+            try:
+                total += _p.stat().st_size
+            except Exception:
+                pass
+        if len(arts) > 4:
+            names = "、".join(p.name for p in arts[:4]) + " 等 %d 个" % len(arts)
+        else:
+            names = "、".join(p.name for p in arts)
+        n_sel = len((self._mem_last or {}).get("selected") or [])
+        msg = ("将清除以下缓存(均可再生,不影响 shuyuan/ 里的书源文件与已下载的书):\n\n"
+               "· 校验产物 %d 个 · %.1f MB\n    %s\n"
+               "· 校验记录 %d 条\n"
+               "· 选项打勾 → 恢复默认(模糊开 · 相关开 · epub · 单本 · 自动)\n"
+               "· 上次选中的书目 %d 本\n\n"
+               "保留:书源勾选清单 %d 个文件(不清)\n\n确定清除?"
+               % (len(arts), total / 1048576.0, names or "(无)",
+                  len(self.verify_dones), n_sel, len(self.checked_files)))
+        if not messagebox.askyesno("清除缓存", msg):
+            return
+        removed = freed = 0
+        for _p in arts:
+            try:
+                sz = _p.stat().st_size
+            except Exception:
+                sz = 0
+            try:
+                _p.unlink()
+                removed, freed = removed + 1, freed + sz
+                self.log("已清除缓存: %s" % _p.name)
+            except Exception as e:
+                self.log("⚠ 清除缓存失败 %s: %s" % (_p.name, e))
+        n_rec = len(self.verify_dones)
         self.verify_dones = {}
+        self.verify_origin = ""
+        self.verify_done = {}
+        # 先把记忆缓存刷成目标态再改控件/重载:_mem_flush 的 selected 取自该缓存,
+        # 不先置空的话重载会把旧选中项回填回去。
         self._mem_last = {"multi": True, "selected": [],
                           "sources": list(self.checked_files),
-                          "verify_dones": {},
-                          "verify_origin": self.verify_origin,
-                          "verify_done": self.verify_done,
+                          "verify_dones": {}, "verify_origin": "", "verify_done": {},
                           "fuzzy": True, "rel": True,
                           "fmt": "epub", "mode": "single", "domain": "自动"}
         for _v, _d in ((self.var_fuzzy, True), (self.var_rel, True),
@@ -1012,7 +1098,11 @@ class App:
                 pass
         self._apply_selection([], notify=False)
         self._reload_all()
-        messagebox.showinfo("清除记忆", "已清除保存的选中与选项状态(恢复默认)。")
+        messagebox.showinfo(
+            "清除缓存",
+            "已清除 %d 个校验产物(释放 %.1f MB)、%d 条校验记录;\n"
+            "选项已恢复默认,上次选中的书目已清空。\n书源勾选清单保留 %d 个文件。"
+            % (removed, freed / 1048576.0, n_rec, len(self.checked_files)))
 
     def _try_restore_selection(self):
         """搜索结果就绪后,按记忆恢复选中(容错:已不存在的条目自动跳过)。"""

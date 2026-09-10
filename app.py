@@ -35,6 +35,22 @@ DEFAULT_SOURCE = SOURCE_DIR / "bookSource.json"
 DEFAULT_OUT = APP_DIR / "downloads"
 STATE_FILE = APP_DIR / "sel_state.json"    # 多选/选中项记忆 + 校验原始表路径(见 _mem_*)
 
+# ---------------------------------------------------------------- 并发度 -----
+# 搜索与校验:每个书源只发 1 个请求,3393 个源分布在 2107 个域名上,
+# 对单个站的压力不随总并发上升,所以可以开大。
+# 实测(2026-09-10,全量 3393 源、12 逻辑核,关键词「剑来」):
+#   并发  40 → 90.2s      并发 256 → 28.2 / 28.3s
+#   并发 384 → 18.3 / 20.4s   并发 512 → 18.7 / 42.1s(开始不稳)
+# CPU 全程只占 1~1.4/12 核 —— 瓶颈是"最慢单源最多等 12s"的超时尾巴,
+# 不是算力。384 是收益/稳定性的拐点,再加只会放大尾部波动。
+# 注意:小批量搜索(十几个到几百个源)提并发没有意义,因为总耗时会撞上
+# 12s 超时下界:实测 240 个源在并发 40~600 之间都是 12s 左右。
+SEARCH_WORKERS = 384
+VERIFY_WORKERS = 384
+# 正文下载是另一回事:同一本书的章节全来自同一个站,并发越高越容易触发限流/封禁,
+# 所以刻意压低,不要跟着搜索一起调大。
+DOWNLOAD_WORKERS = 10
+
 # 书源校验(照 VerifyBookSource 的判定:GET bookSourceUrl,200 即有效)
 VERIFY_UA = {"user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                            "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -612,7 +628,7 @@ class App:
         self._mem_save_core()
 
     # --------------------------------------------------------- 书源校验 -----
-    # 多文件按序校验:每个勾选的原始表独立 64 并发探测 → 各自写 .good.json;
+    # 多文件按序校验:每个勾选的原始表独立 VERIFY_WORKERS 并发探测 → 各自写 .good.json;
     # 停止 = 当前文件中止 + 后续不再开始(已完成的 good 表保留)。
     # 照 xin-verify-book-source 的判定:并发 GET bookSourceUrl,200 即有效。
     def _check_one(self, s):
@@ -650,7 +666,8 @@ class App:
         self.btn_dl.config(state="disabled")
         self.btn_stop.config(state="normal")
         n_files = len(files)
-        self.log("开始校验 %d 个书源文件(并发 64 · 超时 5s · 只测连通性)…" % n_files)
+        self.log("开始校验 %d 个书源文件(并发 %d · 超时 5s · 只测连通性)…"
+                 % (n_files, VERIFY_WORKERS))
         self.lbl_verify.config(text="校验中 · 文件 0/%d" % n_files)
         threading.Thread(target=self._do_verify, args=(files,), daemon=True).start()
 
@@ -675,7 +692,7 @@ class App:
                 continue
             t0 = time.time()
             results, done = [], 0
-            pool = ThreadPoolExecutor(max_workers=64)
+            pool = ThreadPoolExecutor(max_workers=VERIFY_WORKERS)
             try:
                 for ok in pool.map(self._check_one, srcs):
                     results.append(ok)
@@ -784,7 +801,7 @@ class App:
 
         try:
             hits = engine.search_sources(srcs, key, on_progress=prog, stop=self.stop_search,
-                                         workers=40, on_hit=onhit, fuzzy=fuzzy)
+                                         workers=SEARCH_WORKERS, on_hit=onhit, fuzzy=fuzzy)
         except Exception as e:
             self.q.put(("log", "搜索异常: %s" % e))
             hits = []
@@ -1502,7 +1519,8 @@ class App:
                                timeout=6, deadline=time.time() + 15)
         if not toc:
             raise RuntimeError("目录为空(书源被封或需登录)")
-        book = engine.load_book(h, toc=toc, on_progress=prog, stop=self.stop_dl, workers=10)
+        book = engine.load_book(h, toc=toc, on_progress=prog, stop=self.stop_dl,
+                                workers=DOWNLOAD_WORKERS)
         if self.stop_dl.is_set():
             raise RuntimeError("已取消")
         if book["ok"] == 0:
